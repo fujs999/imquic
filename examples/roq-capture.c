@@ -106,6 +106,12 @@ static int roq_capture_open_video_encoder(int width, int height, int fps, int bi
 	enc_target_height = height;
 	enc_target_fps = fps;
 	g_atomic_int_set(&force_video_keyframe, 1);
+	imquic_mutex_lock(&frame_mutex);
+	if(latest_frame != NULL) {
+		av_frame_free(&latest_frame);
+		latest_frame = NULL;
+	}
+	imquic_mutex_unlock(&frame_mutex);
 	return 0;
 }
 
@@ -304,7 +310,6 @@ void roq_capture_destroy(void) {
 	}
 	imquic_mutex_lock(&frame_mutex);
 	if(latest_frame != NULL) {
-		av_freep(&latest_frame->data[0]);
 		av_frame_free(&latest_frame);
 		latest_frame = NULL;
 	}
@@ -398,6 +403,11 @@ static void *roq_capture_video_capture_thread(void *user_data) {
 			scale_width = cfg.width;
 			scale_height = cfg.height;
 		}
+		/* Keep scaling aligned with the active encoder dimensions */
+		if(enc_target_width > 0)
+			scale_width = enc_target_width;
+		if(enc_target_height > 0)
+			scale_height = enc_target_height;
 		if(scale_width <= 0)
 			scale_width = cfg.width;
 		if(scale_height <= 0)
@@ -435,23 +445,19 @@ static void *roq_capture_video_capture_thread(void *user_data) {
 				last_scale_height = scale_height;
 			}
 			AVFrame *scaled_frame = av_frame_alloc();
+			scaled_frame->format = AV_PIX_FMT_YUV420P;
 			scaled_frame->width = scale_width;
 			scaled_frame->height = scale_height;
-			scaled_frame->format = AV_PIX_FMT_YUV420P;
-			ret = av_image_alloc(scaled_frame->data, scaled_frame->linesize,
-				scaled_frame->width, scaled_frame->height, AV_PIX_FMT_YUV420P, 1);
+			ret = av_frame_get_buffer(scaled_frame, 32);
 			if(ret < 0) {
-				av_freep(&scaled_frame->data[0]);
 				av_frame_free(&scaled_frame);
 				break;
 			}
 			sws_scale(sws, (const uint8_t * const*)video_frame->data, video_frame->linesize,
 				0, video_frame->height, scaled_frame->data, scaled_frame->linesize);
 			imquic_mutex_lock(&frame_mutex);
-			if(latest_frame != NULL) {
-				av_freep(&latest_frame->data[0]);
+			if(latest_frame != NULL)
 				av_frame_free(&latest_frame);
-			}
 			latest_frame = scaled_frame;
 			imquic_mutex_unlock(&frame_mutex);
 		}
@@ -494,6 +500,10 @@ static void *roq_capture_video_enc_thread(void *user_data) {
 
 		imquic_mutex_lock(&frame_mutex);
 		if(latest_frame == NULL || videoenc_ctx == NULL) {
+			imquic_mutex_unlock(&frame_mutex);
+			continue;
+		}
+		if(latest_frame->width != videoenc_ctx->width || latest_frame->height != videoenc_ctx->height) {
 			imquic_mutex_unlock(&frame_mutex);
 			continue;
 		}
