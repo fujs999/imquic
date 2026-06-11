@@ -545,6 +545,25 @@ void imquic_close_connection(imquic_connection *conn, uint64_t error, const char
 	imquic_connection_close(conn, error, reason);
 }
 
+int imquic_get_connection_path_quality(imquic_connection *conn, imquic_path_quality *quality) {
+	picoquic_path_quality_t pq = { 0 };
+	if(imquic_connection_get_path_quality(conn, &pq) < 0)
+		return -1;
+	quality->receive_rate_bps = pq.receive_rate_estimate;
+	quality->pacing_rate_bps = pq.pacing_rate;
+	quality->cwin = pq.cwin;
+	quality->rtt_us = pq.rtt;
+	quality->rtt_jitter_us = pq.rtt_variant;
+	quality->packets_sent = pq.sent;
+	quality->packets_lost = pq.lost;
+	quality->bytes_in_transit = pq.bytes_in_transit;
+	return 0;
+}
+
+void imquic_enable_connection_loss_feedback(imquic_connection *conn) {
+	imquic_connection_enable_loss_feedback(conn);
+}
+
 /* References */
 void imquic_connection_ref(imquic_connection *conn) {
 	if(conn)

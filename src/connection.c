@@ -10,6 +10,10 @@
  * \ingroup Core
  */
 
+#include <string.h>
+
+#include <picoquic.h>
+
 #include "internal/connection.h"
 #include "internal/stream.h"
 #include "internal/utils.h"
@@ -332,6 +336,20 @@ void imquic_connection_event_destroy(imquic_connection_event *event) {
 		g_free(event->reason);
 		g_free(event);
 	}
+}
+
+int imquic_connection_get_path_quality(imquic_connection *conn, picoquic_path_quality_t *quality) {
+	if(conn == NULL || conn->piconn == NULL || quality == NULL)
+		return -1;
+	memset(quality, 0, sizeof(*quality));
+	picoquic_get_default_path_quality(conn->piconn, quality);
+	return 0;
+}
+
+void imquic_connection_enable_loss_feedback(imquic_connection *conn) {
+	if(conn == NULL || conn->piconn == NULL)
+		return;
+	picoquic_set_feedback_loss_notification(conn->piconn, 1);
 }
 
 /* Clean the list of queued events for a connection */

@@ -158,6 +158,14 @@ void imquic_connection_stop_sending_stream(imquic_connection *conn, uint64_t str
  * @param error_code The error code to send back in the \c CONNECTION_CLOSE frame
  * @param reason A verbose description of the error, if any */
 void imquic_connection_close(imquic_connection *conn, uint64_t error_code, const char *reason);
+/*! \brief Helper to read path quality metrics from the underlying QUIC stack
+ * @param conn The imquic_connection instance to query
+ * @param quality Output structure for path quality metrics
+ * @returns 0 if successful, a negative integer otherwise */
+int imquic_connection_get_path_quality(imquic_connection *conn, picoquic_path_quality_t *quality);
+/*! \brief Enable fast loss feedback notifications on a connection
+ * @param conn The imquic_connection instance to configure */
+void imquic_connection_enable_loss_feedback(imquic_connection *conn);
 ///@}
 
 /** @name Connection events

@@ -542,6 +542,35 @@ int imquic_send_on_datagram(imquic_connection *conn, uint8_t *bytes, uint64_t le
  * @param[in] error The application error code to send, if any
  * @param[in] reason A string description of why the connection was closed, if any */
 void imquic_close_connection(imquic_connection *conn, uint64_t error, const char *reason);
+
+/*! \brief Path quality metrics for a QUIC connection */
+typedef struct imquic_path_quality {
+	/*! \brief Estimated receive rate, in bytes per second */
+	uint64_t receive_rate_bps;
+	/*! \brief Pacing rate, in bytes per second */
+	uint64_t pacing_rate_bps;
+	/*! \brief Congestion window, in bytes */
+	uint64_t cwin;
+	/*! \brief Smoothed RTT, in microseconds */
+	uint64_t rtt_us;
+	/*! \brief RTT jitter estimate, in microseconds */
+	uint64_t rtt_jitter_us;
+	/*! \brief Packets sent on the path */
+	uint64_t packets_sent;
+	/*! \brief Packets considered lost among those sent */
+	uint64_t packets_lost;
+	/*! \brief Bytes currently in transit */
+	uint64_t bytes_in_transit;
+} imquic_path_quality;
+
+/*! \brief Helper method to read path quality metrics from a connection
+ * @param[in] conn The imquic_connection to query
+ * @param[out] quality Where to write the path quality metrics
+ * @returns 0 if successful, a negative integer otherwise */
+int imquic_get_connection_path_quality(imquic_connection *conn, imquic_path_quality *quality);
+/*! \brief Enable fast loss feedback notifications on a connection
+ * @param[in] conn The imquic_connection to configure */
+void imquic_enable_connection_loss_feedback(imquic_connection *conn);
 ///@}
 
 /** @name Public imquic utilities

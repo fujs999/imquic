@@ -29,6 +29,7 @@
 #include <SDL2/SDL.h>
 
 #include "moq-loc-send-options.h"
+#include "moq-loc-abr.h"
 #include "moq-utils.h"
 
 /* Command line options */
@@ -103,13 +104,133 @@ static imquic_demo_video_codec codec = DEMO_H264_AVCC;
 static AVCodec *video_codec = NULL;
 static AVCodecContext *webcam_ctx = NULL, *videoenc_ctx = NULL;
 static struct SwsContext *sws = NULL;
-static GThread *audio_thread = NULL, *video_capture_thread = NULL, *video_enc_thread = NULL;
+static GThread *audio_thread = NULL, *video_capture_thread = NULL, *video_enc_thread = NULL, *abr_thread = NULL;
 static AVFrame *latest_frame = NULL;
 static imquic_mutex mutex = IMQUIC_MUTEX_INITIALIZER;
+static imquic_mutex send_mutex = IMQUIC_MUTEX_INITIALIZER;
+
+/* Adaptive bitrate */
+static moq_loc_abr *abr = NULL;
+static uint64_t send_ok_count = 0, send_fail_count = 0, video_bytes_sent = 0;
+static int applied_enc_generation = 0, applied_audio_bitrate = 0;
+static int enc_target_width = 0, enc_target_height = 0, enc_target_fps = 0;
+static volatile int force_video_keyframe = 0;
 
 static void *imquic_demo_audio_thread(void *user_data);
 static void *imquic_demo_video_capture_thread(void *user_data);
 static void *imquic_demo_video_enc_thread(void *user_data);
+static void *imquic_demo_abr_thread(void *user_data);
+
+static void imquic_demo_track_send(gboolean video, int ret, size_t bytes) {
+	imquic_mutex_lock(&send_mutex);
+	if(ret >= 0) {
+		send_ok_count++;
+		if(video)
+			video_bytes_sent += bytes;
+	} else {
+		send_fail_count++;
+	}
+	imquic_mutex_unlock(&send_mutex);
+}
+
+static int imquic_demo_send_object(imquic_moq_object *object, gboolean video) {
+	int ret = imquic_moq_send_object(moq_conn, object);
+	imquic_demo_track_send(video, ret, object ? object->payload_len : 0);
+	return ret;
+}
+
+static int imquic_demo_apply_video_bitrate(int bitrate) {
+	char br[20];
+	if(videoenc_ctx == NULL || bitrate <= 0)
+		return -1;
+	videoenc_ctx->bit_rate = bitrate;
+	videoenc_ctx->rc_max_rate = bitrate + (bitrate / 10);
+	videoenc_ctx->rc_buffer_size = 2 * bitrate;
+	g_snprintf(br, sizeof(br), "%d", bitrate / 1024);
+	av_opt_set(videoenc_ctx->priv_data, "b", br, AV_OPT_SEARCH_CHILDREN);
+	return 0;
+}
+
+static int imquic_demo_open_video_encoder_ctx(int width, int height, int fps, int bitrate) {
+	if(video_codec == NULL || width <= 0 || height <= 0 || fps <= 0 || bitrate <= 0)
+		return -1;
+	if(videoenc_ctx != NULL) {
+		avcodec_flush_buffers(videoenc_ctx);
+		avcodec_free_context(&videoenc_ctx);
+		videoenc_ctx = NULL;
+	}
+	videoenc_ctx = avcodec_alloc_context3(video_codec);
+	videoenc_ctx->bit_rate = bitrate;
+	videoenc_ctx->rc_max_rate = videoenc_ctx->bit_rate + (videoenc_ctx->bit_rate / 10);
+	videoenc_ctx->rc_buffer_size = 2 * videoenc_ctx->bit_rate;
+	videoenc_ctx->width = width;
+	videoenc_ctx->height = height;
+	videoenc_ctx->time_base = (AVRational){ 1, fps };
+	videoenc_ctx->gop_size = fps * 2;
+	videoenc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+	videoenc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_ANNEXB) {
+		videoenc_ctx->profile = FF_PROFILE_H264_BASELINE;
+		videoenc_ctx->level = 41;
+	}
+	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_ANNEXB) {
+		char br[20];
+		g_snprintf(br, sizeof(br), "%"SCNi64, videoenc_ctx->bit_rate / 1024);
+		av_opt_set(videoenc_ctx->priv_data, "b", br, AV_OPT_SEARCH_CHILDREN);
+		av_opt_set(videoenc_ctx->priv_data, "crf", "23", AV_OPT_SEARCH_CHILDREN);
+		av_opt_set(videoenc_ctx->priv_data, "profile", "baseline", 0);
+		av_opt_set(videoenc_ctx->priv_data, "preset", "ultrafast", 0);
+		av_opt_set(videoenc_ctx->priv_data, "tune", "zerolatency", 0);
+	} else if(codec == DEMO_VP8) {
+		char br[20];
+		g_snprintf(br, sizeof(br), "%d", bitrate / 1024);
+		av_opt_set(videoenc_ctx->priv_data, "b", br, 0);
+		av_opt_set(videoenc_ctx->priv_data, "speed", "7", 0);
+		av_opt_set_double(videoenc_ctx->priv_data, "max-intra-rate", 300, 0);
+		av_opt_set(videoenc_ctx->priv_data, "quality", "realtime", 0);
+		av_opt_set(videoenc_ctx->priv_data, "threads", "2", 0);
+	} else if(codec == DEMO_VP9) {
+		char br[20];
+		g_snprintf(br, sizeof(br), "%d", bitrate / 1024);
+		av_opt_set(videoenc_ctx->priv_data, "b", br, 0);
+		av_opt_set(videoenc_ctx->priv_data, "speed", "7", 0);
+		av_opt_set_double(videoenc_ctx->priv_data, "max-intra-rate", 300, 0);
+		av_opt_set(videoenc_ctx->priv_data, "quality", "realtime", 0);
+		av_opt_set(videoenc_ctx->priv_data, "lag-in-frames", "0", 0);
+		av_opt_set(videoenc_ctx->priv_data, "tile-columns", "2", 0);
+		av_opt_set(videoenc_ctx->priv_data, "row-mt", "1", 0);
+		av_opt_set(videoenc_ctx->priv_data, "threads", "2", 0);
+	}
+	if(avcodec_open2(videoenc_ctx, video_codec, NULL) < 0) {
+		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error opening video encoder\n");
+		avcodec_free_context(&videoenc_ctx);
+		videoenc_ctx = NULL;
+		return -1;
+	}
+	enc_target_width = width;
+	enc_target_height = height;
+	enc_target_fps = fps;
+	g_atomic_int_set(&force_video_keyframe, 1);
+	return 0;
+}
+
+static void imquic_demo_apply_abr_video_config(void) {
+	moq_loc_abr_config cfg = { 0 };
+	int generation = 0;
+	if(abr == NULL)
+		return;
+	generation = moq_loc_abr_config_generation(abr);
+	if(generation == applied_enc_generation)
+		return;
+	moq_loc_abr_get_config(abr, &cfg);
+	if(cfg.width != enc_target_width || cfg.height != enc_target_height || cfg.fps != enc_target_fps) {
+		if(imquic_demo_open_video_encoder_ctx(cfg.width, cfg.height, cfg.fps, cfg.video_bitrate) < 0)
+			return;
+	} else {
+		imquic_demo_apply_video_bitrate(cfg.video_bitrate);
+	}
+	applied_enc_generation = generation;
+}
 
 static int imquic_demo_create_audio_encoder(void) {
 	if(options.audio_track_name == NULL)
@@ -205,47 +326,8 @@ static int imquic_demo_create_video_encoder(void) {
 
 	/* Create a video encoder */
 	int width = options.width, height = options.height, fps = options.video_framerate;
-	videoenc_ctx = avcodec_alloc_context3(video_codec);
-	videoenc_ctx->bit_rate = options.video_bitrate;
-	videoenc_ctx->rc_max_rate = videoenc_ctx->bit_rate + (videoenc_ctx->bit_rate/10);
-	videoenc_ctx->rc_buffer_size = 2 * videoenc_ctx->bit_rate;
-	videoenc_ctx->width = width;
-	videoenc_ctx->height = height;
-	videoenc_ctx->time_base = (AVRational){ 1, fps };
-	videoenc_ctx->gop_size = fps * 5;
-	videoenc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-	videoenc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_ANNEXB) {
-		videoenc_ctx->profile = FF_PROFILE_H264_BASELINE;
-		videoenc_ctx->level = 41;
-	}
-	char br[20];
-	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_ANNEXB) {
-		g_snprintf(br, sizeof(br), "%"SCNi64, videoenc_ctx->bit_rate/1024);
-		av_opt_set(videoenc_ctx->priv_data, "b", br, AV_OPT_SEARCH_CHILDREN);
-		av_opt_set(videoenc_ctx->priv_data, "crf", "18", AV_OPT_SEARCH_CHILDREN);
-		av_opt_set(videoenc_ctx->priv_data, "profile", "baseline", 0);
-		av_opt_set(videoenc_ctx->priv_data, "preset", "ultrafast", 0);
-		av_opt_set(videoenc_ctx->priv_data, "tune", "zerolatency", 0);
-	} else if(codec == DEMO_VP8) {
-		av_opt_set(videoenc_ctx->priv_data, "speed", "7", 0);
-		av_opt_set_double(videoenc_ctx->priv_data, "max-intra-rate", 300, 0);
-		av_opt_set(videoenc_ctx->priv_data, "quality", "realtime", 0);
-		av_opt_set(videoenc_ctx->priv_data, "threads", "2", 0);
-	} else if(codec == DEMO_VP9) {
-		av_opt_set(videoenc_ctx->priv_data, "speed", "7", 0);
-		av_opt_set_double(videoenc_ctx->priv_data, "max-intra-rate", 300, 0);
-		av_opt_set(videoenc_ctx->priv_data, "quality", "realtime", 0);
-		av_opt_set(videoenc_ctx->priv_data, "lag-in-frames", "0", 0);
-		av_opt_set(videoenc_ctx->priv_data, "tile-columns", "2", 0);
-		av_opt_set(videoenc_ctx->priv_data, "row-mt", "1", 0);
-		av_opt_set(videoenc_ctx->priv_data, "threads", "2", 0);
-	}
-	if(avcodec_open2(videoenc_ctx, video_codec, NULL) < 0) {
-		/* Error creating video encoder */
-		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error opening video encoder\n");
+	if(imquic_demo_open_video_encoder_ctx(width, height, fps, options.video_bitrate) < 0)
 		return -1;
-	}
 
 	/* Spawn threads: we use one to capture and one to encode in order
 	 * to allow us to separate capture rate and encoding rate properly */
@@ -398,6 +480,14 @@ static void *imquic_demo_audio_thread(void *user_data) {
 		cached += got;
 		if(cached == want) {
 			/* We have enough to send, encode the audio */
+			if(abr != NULL) {
+				moq_loc_abr_config cfg = { 0 };
+				moq_loc_abr_get_config(abr, &cfg);
+				if(cfg.audio_bitrate != applied_audio_bitrate) {
+					if(opus_encoder_ctl(audioenc, OPUS_SET_BITRATE(cfg.audio_bitrate)) == OPUS_OK)
+						applied_audio_bitrate = cfg.audio_bitrate;
+				}
+			}
 			IMQUIC_LOG(IMQUIC_LOG_VERB, "  -- %"SCNu32" chunks cached, encoding to Opus\n", cached);
 			length = opus_encode(audioenc, (opus_int16 *)audio, cached/2, outgoing, outlen);
 			cached = 0;
@@ -431,7 +521,7 @@ static void *imquic_demo_audio_thread(void *user_data) {
 				.delivery = IMQUIC_MOQ_USE_DATAGRAM,
 				.end_of_stream = TRUE
 			};
-			imquic_moq_send_object(moq_conn, &object);
+			imquic_demo_send_object(&object, FALSE);
 			g_list_free(props);
 		}
 	}
@@ -445,6 +535,7 @@ static void *imquic_demo_video_capture_thread(void *user_data) {
 
 	AVPacket packet = { 0 };
 	AVFrame *video_frame = av_frame_alloc();
+	int scale_width = 0, scale_height = 0, last_scale_width = 0, last_scale_height = 0;
 
 	while(!stop) {
 		/* FIXME Loop */
@@ -452,6 +543,20 @@ static void *imquic_demo_video_capture_thread(void *user_data) {
 			g_usleep(100000);
 			continue;
 		}
+
+		if(abr != NULL) {
+			moq_loc_abr_config cfg = { 0 };
+			moq_loc_abr_get_config(abr, &cfg);
+			scale_width = cfg.width;
+			scale_height = cfg.height;
+		} else {
+			scale_width = options.width;
+			scale_height = options.height;
+		}
+		if(scale_width <= 0)
+			scale_width = options.width;
+		if(scale_height <= 0)
+			scale_height = options.height;
 
 		/* Read from the video device */
 		memset(&packet, 0, sizeof(packet));
@@ -487,14 +592,18 @@ static void *imquic_demo_video_capture_thread(void *user_data) {
 			}
 			IMQUIC_LOG(IMQUIC_LOG_VERB, "Frame resolution: %dx%d\n",
 				video_frame->width, video_frame->height);
-			/* Convert the video frame to the right format */
-			if(sws == NULL) {
+			/* Convert the video frame to the right format and scale to ABR target */
+			if(sws == NULL || scale_width != last_scale_width || scale_height != last_scale_height) {
+				if(sws != NULL)
+					sws_freeContext(sws);
 				sws = sws_getContext(video_frame->width, video_frame->height, video_frame->format,
-					video_frame->width, video_frame->height, AV_PIX_FMT_YUVA420P, SWS_BICUBIC, NULL, NULL, NULL);
+					scale_width, scale_height, AV_PIX_FMT_YUVA420P, SWS_BICUBIC, NULL, NULL, NULL);
+				last_scale_width = scale_width;
+				last_scale_height = scale_height;
 			}
 			AVFrame *scaled_frame = av_frame_alloc();
-			scaled_frame->width = video_frame->width;
-			scaled_frame->height = video_frame->height;
+			scaled_frame->width = scale_width;
+			scaled_frame->height = scale_height;
 			scaled_frame->format = AV_PIX_FMT_YUVA420P;
 			ret = av_image_alloc(scaled_frame->data, scaled_frame->linesize,
 				scaled_frame->width, scaled_frame->height, AV_PIX_FMT_YUVA420P, 1);
@@ -528,7 +637,8 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "Starting video encoding thread\n");
 
 	AVPacket packet = { 0 };
-	int64_t now = 0, before = 0, wait = G_USEC_PER_SEC/options.video_framerate;
+	int64_t now = 0, before = 0, wait = G_USEC_PER_SEC / options.video_framerate;
+	int target_fps = options.video_framerate;
 
 	while(!stop) {
 		/* FIXME Loop */
@@ -536,6 +646,17 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 			g_usleep(100000);
 			continue;
 		}
+
+		if(abr != NULL) {
+			moq_loc_abr_config cfg = { 0 };
+			imquic_demo_apply_abr_video_config();
+			moq_loc_abr_get_config(abr, &cfg);
+			if(cfg.fps > 0)
+				target_fps = cfg.fps;
+		}
+		if(target_fps <= 0)
+			target_fps = 1;
+		wait = G_USEC_PER_SEC / target_fps;
 
 		/* Check when it's time to produce a new video frame */
 		now = g_get_monotonic_time();
@@ -549,7 +670,7 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 		before += wait;
 
 		imquic_mutex_lock(&mutex);
-		if(latest_frame == NULL) {
+		if(latest_frame == NULL || videoenc_ctx == NULL) {
 			/* No frame available yet */
 			imquic_mutex_unlock(&mutex);
 			continue;
@@ -559,6 +680,12 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 		packet.pts = AV_NOPTS_VALUE;
 		packet.dts = AV_NOPTS_VALUE;
 		packet.pos = -1;
+		if(g_atomic_int_get(&force_video_keyframe)) {
+			latest_frame->pict_type = AV_PICTURE_TYPE_I;
+			g_atomic_int_set(&force_video_keyframe, 0);
+		} else {
+			latest_frame->pict_type = AV_PICTURE_TYPE_NONE;
+		}
 		int ret = avcodec_send_frame(videoenc_ctx, latest_frame);
 		imquic_mutex_unlock(&mutex);
 		if(ret < 0) {
@@ -599,7 +726,7 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 					.delivery = IMQUIC_MOQ_USE_SUBGROUP,
 					.end_of_stream = TRUE
 				};
-				imquic_moq_send_object(moq_conn, &object);
+				imquic_demo_send_object(&object, TRUE);
 			}
 			video_group_id++;
 			video_object_id = 0;
@@ -670,12 +797,32 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 			.end_of_stream = FALSE
 		};
 		video_object_id++;
-		imquic_moq_send_object(moq_conn, &object);
+		imquic_demo_send_object(&object, TRUE);
 		g_list_free(props);
 		av_packet_unref(&packet);
 	}
 
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "Leaving video encoding thread\n");
+	return NULL;
+}
+
+static void *imquic_demo_abr_thread(void *user_data) {
+	IMQUIC_LOG(IMQUIC_LOG_INFO, "Starting ABR control thread\n");
+
+	while(!stop) {
+		if(abr != NULL && moq_conn != NULL && g_atomic_int_get(&video_started)) {
+			uint64_t ok = 0, fail = 0, bytes = 0;
+			imquic_mutex_lock(&send_mutex);
+			ok = send_ok_count;
+			fail = send_fail_count;
+			bytes = video_bytes_sent;
+			imquic_mutex_unlock(&send_mutex);
+			moq_loc_abr_update(abr, moq_conn, ok, fail, bytes);
+		}
+		g_usleep(500000);
+	}
+
+	IMQUIC_LOG(IMQUIC_LOG_INFO, "Leaving ABR control thread\n");
 	return NULL;
 }
 
@@ -689,6 +836,8 @@ static void imquic_demo_new_connection(imquic_connection *conn, void *user_data)
 		imquic_is_connection_webtransport(conn) ? "WebTransport" : "Raw QUIC",
 		imquic_is_connection_webtransport(conn) ? imquic_get_connection_wt_protocol(conn) : imquic_get_connection_alpn(conn));
 	imquic_moq_set_max_request_id(conn, max_request_id);
+	if(!options.no_adaptive)
+		imquic_enable_connection_loss_feedback(conn);
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] Waiting for MoQ connection to be ready (SETUP)...\n",
 		imquic_get_connection_name(conn));
 }
@@ -1140,6 +1289,17 @@ int main(int argc, char *argv[]) {
 		imquic_moq_catalog_add_track(catalog, track);
 	}
 
+	if(options.video_track_name != NULL && !options.no_adaptive) {
+		abr = moq_loc_abr_create(options.width, options.height, options.video_framerate,
+			options.video_bitrate, options.audio_bitrate > 0 ? options.audio_bitrate : 32000);
+		applied_enc_generation = moq_loc_abr_config_generation(abr);
+		applied_audio_bitrate = options.audio_bitrate > 0 ? options.audio_bitrate : 32000;
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "Adaptive streaming enabled (targets: RTT<=150ms, jitter<=50ms, loss<=50%%)\n");
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Max quality: %dx%d@%d, %d bps video, %d bps audio\n",
+			options.width, options.height, options.video_framerate,
+			options.video_bitrate, applied_audio_bitrate);
+	}
+
 	if(options.publish)
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "Will use PUBLISH instead of PUBLISH_NAMESPACE + SUBSCRIBE\n");
 
@@ -1184,6 +1344,16 @@ int main(int argc, char *argv[]) {
 	if(options.video_track_name != NULL && imquic_demo_create_video_encoder() < 0) {
 		g_atomic_int_set(&stop, 1);
 		goto done;
+	}
+	if(abr != NULL) {
+		GError *error = NULL;
+		abr_thread = g_thread_try_new("loc-abr", &imquic_demo_abr_thread, NULL, &error);
+		if(error != NULL) {
+			IMQUIC_LOG(IMQUIC_LOG_FATAL, "Got error %d (%s) trying to start ABR thread\n",
+				error->code, error->message ? error->message : "??");
+			g_atomic_int_set(&stop, 1);
+			goto done;
+		}
 	}
 
 	/* Create a client endpoint */
@@ -1263,7 +1433,7 @@ int main(int argc, char *argv[]) {
 					.delivery = IMQUIC_MOQ_USE_SUBGROUP,
 					.end_of_stream = TRUE
 				};
-				imquic_moq_send_object(moq_conn, &object);
+				imquic_demo_send_object(&object, FALSE);
 				g_free(json);
 			}
 		}
@@ -1304,6 +1474,11 @@ done:
 		g_thread_join(video_capture_thread);
 	if(video_enc_thread != NULL)
 		g_thread_join(video_enc_thread);
+	if(abr_thread != NULL)
+		g_thread_join(abr_thread);
+	if(abr != NULL)
+		moq_loc_abr_destroy(abr);
+	abr = NULL;
 	if(latest_frame != NULL) {
 		av_freep(&latest_frame->data[0]);
 		av_frame_free(&latest_frame);

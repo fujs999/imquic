@@ -29,6 +29,7 @@ typedef struct demo_options {
 	int video_framerate;
 	int audio_bitrate;
 	int video_bitrate;
+	gboolean no_adaptive;
 	const char *video_codec;
 	gboolean publish;
 	const char *ip;
