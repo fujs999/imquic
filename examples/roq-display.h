@@ -22,6 +22,7 @@ typedef struct roq_display_config {
 	int64_t video_flow;
 	uint8_t video_pt;
 	imquic_demo_video_codec video_codec;
+	int svc_temporal_layers;
 	int svc_max_temporal_layer;
 	int svc_max_spatial_layer;
 	gboolean no_svc_adaptive;
@@ -33,7 +34,11 @@ typedef struct roq_display_config {
 	gboolean debug_ffmpeg;
 } roq_display_config;
 
+typedef void (*roq_display_svc_feedback_cb)(imquic_connection *conn, uint8_t max_temporal_layer, void *user_data);
+
 int roq_display_init(const roq_display_config *config);
+gboolean roq_display_svc_adaptive_enabled(void);
+void roq_display_set_svc_feedback_cb(roq_display_svc_feedback_cb cb, void *user_data);
 void roq_display_connection_gone(imquic_connection *conn);
 void roq_display_feed_rtp(imquic_connection *conn, uint64_t flow_id, uint8_t *rtp, size_t rtp_len);
 int roq_display_handle_events(void);

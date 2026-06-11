@@ -127,7 +127,7 @@ static imquic_connection *imquic_demo_get_abr_connection(void) {
 static void *imquic_demo_abr_thread(void *user_data) {
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "Starting ABR control thread\n");
 	while(!g_atomic_int_get(&stop)) {
-		if(abr != NULL && g_atomic_int_get(&capture_active)) {
+		if((abr != NULL || svc_abr != NULL) && g_atomic_int_get(&capture_active)) {
 			imquic_connection *conn = imquic_demo_get_abr_connection();
 			if(conn != NULL) {
 				uint64_t ok = 0, fail = 0, bytes = 0;
@@ -161,7 +161,7 @@ static void imquic_demo_new_connection(imquic_connection *conn, void *user_data)
 		imquic_is_connection_webtransport(conn) ? "WebTransport" : "Raw QUIC",
 		imquic_is_connection_webtransport(conn) ? imquic_get_connection_wt_protocol(conn) : imquic_get_connection_alpn(conn));
 #ifdef HAVE_ROQ_CAPTURE
-	if(!options.no_adaptive)
+	if(!options.no_adaptive || (svc_abr != NULL))
 		imquic_enable_connection_loss_feedback(conn);
 	if(options.capture && !g_atomic_int_get(&capture_active)) {
 		g_atomic_int_set(&capture_active, 1);
@@ -173,13 +173,26 @@ static void imquic_demo_new_connection(imquic_connection *conn, void *user_data)
 
 static void imquic_demo_rtp_incoming(imquic_connection *conn, imquic_roq_multiplexing mplex,
 		uint64_t flow_id, uint8_t *bytes, size_t blen) {
-	/* If this is called, it means the receiver we're sending RTP packets to
-	 * sent us something back (e.g., the imquic RoQ receiver in echo mode) */
-	if(!imquic_roq_is_rtp(bytes, blen)) {
+	if(!imquic_roq_is_rtp(bytes, (guint)blen)) {
 		IMQUIC_LOG(IMQUIC_LOG_WARN, "[%s]  -- [flow=%"SCNu64"][%zu] Not an RTP packet\n",
 			imquic_get_connection_name(conn), flow_id, blen);
 		return;
 	}
+#ifdef HAVE_ROQ_CAPTURE
+	{
+		uint8_t remote_max_layer = 0;
+		imquic_roq_rtp_header *rtp = (imquic_roq_rtp_header *)bytes;
+		if(imquic_roq_rtp_is_svc_feedback(flow_id, rtp->type) &&
+				imquic_roq_rtp_parse_svc_feedback(bytes, blen, &remote_max_layer)) {
+			roq_capture_set_remote_max_temporal_layer((int)remote_max_layer);
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] Remote SVC max temporal layer: %u\n",
+				imquic_get_connection_name(conn), remote_max_layer);
+			return;
+		}
+	}
+#endif
+	/* If this is called, it means the receiver we're sending RTP packets to
+	 * sent us something back (e.g., the imquic RoQ receiver in echo mode) */
 	imquic_roq_rtp_header *rtp = (imquic_roq_rtp_header *)bytes;
 	if(!options.quiet) {
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s][recv]  -- [%s][flow=%"SCNu64"][%zu] ssrc=%"SCNu32", pt=%d, seq=%"SCNu16", ts=%"SCNu32"\n",
@@ -342,6 +355,8 @@ int main(int argc, char *argv[]) {
 			int temporal_layers = options.svc_temporal_layers > 0 ? options.svc_temporal_layers : 2;
 			svc_abr = moq_loc_svc_abr_create(temporal_layers);
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive layer selection enabled (targets: RTT<=150ms, jitter<=50ms, loss<=50%%)\n");
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- End-to-end feedback on flow %d, pt %d\n",
+				IMQUIC_ROQ_SVC_FEEDBACK_FLOW_ID, IMQUIC_ROQ_SVC_FEEDBACK_PAYLOAD_TYPE);
 		}
 	} else
 #endif

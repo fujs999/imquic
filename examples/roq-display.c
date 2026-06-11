@@ -51,6 +51,10 @@ static int svc_max_temporal_cap = -1;
 static int svc_temporal_layers = 2;
 static int svc_current_temporal_layer = 0;
 static moq_loc_svc_abr *svc_abr = NULL;
+static gboolean svc_adaptive_enabled = FALSE;
+static roq_display_svc_feedback_cb svc_feedback_cb = NULL;
+static void *svc_feedback_user_data = NULL;
+static int svc_feedback_last_layer = -1;
 
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
@@ -110,6 +114,7 @@ static const char *roq_display_font_paths[] = {
 
 static void roq_display_update_stats(uint32_t ticks);
 static void roq_display_update_svc_abr(void);
+static void roq_display_maybe_send_svc_feedback(void);
 
 static void roq_display_reset_depay(void) {
 	if(depay.access_unit != NULL)
@@ -587,7 +592,10 @@ static void roq_display_update_svc_abr(void) {
 		return;
 	if(svc_abr == NULL) {
 		svc_abr = moq_loc_svc_abr_create(svc_temporal_layers);
+		svc_adaptive_enabled = TRUE;
 		svc_max_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive decode enabled (%d temporal layers)\n", svc_temporal_layers);
+		roq_display_maybe_send_svc_feedback();
 		return;
 	}
 	imquic_mutex_lock(&stats_mutex);
@@ -601,6 +609,26 @@ static void roq_display_update_svc_abr(void) {
 			svc_max_temporal_layer = svc_max_temporal_cap;
 	}
 	imquic_mutex_unlock(&stats_mutex);
+	roq_display_maybe_send_svc_feedback();
+}
+
+static void roq_display_maybe_send_svc_feedback(void) {
+	imquic_connection *conn = NULL;
+	if(svc_feedback_cb == NULL || !svc_adaptive_enabled || svc_max_temporal_layer < 0)
+		return;
+	if(svc_max_temporal_layer == svc_feedback_last_layer)
+		return;
+	imquic_mutex_lock(&stats_mutex);
+	if(stats_conn != NULL) {
+		conn = stats_conn;
+		imquic_connection_ref(conn);
+	}
+	imquic_mutex_unlock(&stats_mutex);
+	if(conn == NULL)
+		return;
+	svc_feedback_cb(conn, (uint8_t)svc_max_temporal_layer, svc_feedback_user_data);
+	svc_feedback_last_layer = svc_max_temporal_layer;
+	imquic_connection_unref(conn);
 }
 
 static int roq_display_decode_access_unit(uint8_t *buffer, size_t length, gboolean keyframe) {
@@ -745,11 +773,18 @@ int roq_display_init(const roq_display_config *config) {
 	if(svc_max_temporal_cap >= 0)
 		svc_max_temporal_layer = svc_max_temporal_cap;
 	if(moq_loc_svc_is_svc_codec(video_codec_id)) {
-		svc_temporal_layers = MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS;
-		if(svc_max_temporal_cap >= 0 && svc_max_temporal_cap + 1 < svc_temporal_layers)
+		if(cfg.svc_temporal_layers >= 2)
+			svc_temporal_layers = cfg.svc_temporal_layers;
+		else if(svc_max_temporal_cap >= 0)
 			svc_temporal_layers = svc_max_temporal_cap + 1;
 		if(svc_temporal_layers < 2)
 			svc_temporal_layers = 2;
+		if(svc_temporal_layers > MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS)
+			svc_temporal_layers = MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS;
+		if(!cfg.no_svc_adaptive && svc_max_temporal_cap < 0) {
+			svc_adaptive_enabled = TRUE;
+			svc_max_temporal_layer = svc_temporal_layers - 1;
+		}
 	}
 
 	if(cfg.play_video) {
@@ -812,6 +847,15 @@ void roq_display_connection_gone(imquic_connection *conn) {
 		stats_conn = NULL;
 	}
 	imquic_mutex_unlock(&stats_mutex);
+}
+
+gboolean roq_display_svc_adaptive_enabled(void) {
+	return svc_adaptive_enabled;
+}
+
+void roq_display_set_svc_feedback_cb(roq_display_svc_feedback_cb cb, void *user_data) {
+	svc_feedback_cb = cb;
+	svc_feedback_user_data = user_data;
 }
 
 void roq_display_feed_rtp(imquic_connection *conn, uint64_t flow_id, uint8_t *rtp, size_t rtp_len) {

@@ -16,7 +16,32 @@
 #include "roq-receiver-options.h"
 #ifdef HAVE_ROQ_DISPLAY
 #include "roq-display.h"
+#include "moq-loc-svc.h"
 #include "moq-utils.h"
+#include "roq-utils.h"
+#endif
+
+/* Handled connections */
+static GHashTable *connections = NULL;
+
+#ifdef HAVE_ROQ_DISPLAY
+static imquic_roq_rtp_state svc_feedback_rtp = { 0 };
+
+static void imquic_demo_send_svc_feedback(imquic_connection *conn, uint8_t max_temporal_layer, void *user_data) {
+	uint8_t packet[64];
+	size_t plen = 0;
+	if(conn == NULL)
+		return;
+	plen = imquic_roq_rtp_build_svc_feedback(&svc_feedback_rtp, packet, sizeof(packet), max_temporal_layer);
+	if(plen == 0)
+		return;
+	if(imquic_roq_send_rtp(conn, IMQUIC_ROQ_DATAGRAM, IMQUIC_ROQ_SVC_FEEDBACK_FLOW_ID, packet, plen, FALSE) == 0) {
+		IMQUIC_LOG(IMQUIC_LOG_WARN, "[%s] Couldn't send SVC layer feedback\n", imquic_get_connection_name(conn));
+		return;
+	}
+	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] SVC feedback: max temporal layer %u\n",
+		imquic_get_connection_name(conn), max_temporal_layer);
+}
 #endif
 
 /* Command line options */
@@ -40,9 +65,6 @@ static void imquic_demo_handle_signal(int signum) {
 	if(g_atomic_int_get(&stop) > 2)
 		exit(1);
 }
-
-/* Handled connections */
-static GHashTable *connections = NULL;
 
 /* RTP header */
 typedef struct imquic_rtp_header {
@@ -90,6 +112,10 @@ static void imquic_demo_new_connection(imquic_connection *conn, void *user_data)
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s]   -- %s (%s)\n", imquic_get_connection_name(conn),
 		imquic_is_connection_webtransport(conn) ? "WebTransport" : "Raw QUIC",
 		imquic_is_connection_webtransport(conn) ? imquic_get_connection_wt_protocol(conn) : imquic_get_connection_alpn(conn));
+#ifdef HAVE_ROQ_DISPLAY
+	if(roq_display_svc_adaptive_enabled())
+		imquic_enable_connection_loss_feedback(conn);
+#endif
 }
 
 static void imquic_demo_rtp_incoming(imquic_connection *conn, imquic_roq_multiplexing multiplexing,
@@ -102,6 +128,10 @@ static void imquic_demo_rtp_incoming(imquic_connection *conn, imquic_roq_multipl
 		return;
 	}
 	imquic_rtp_header *rtp = (imquic_rtp_header *)bytes;
+#ifdef HAVE_ROQ_DISPLAY
+	if(imquic_roq_rtp_is_svc_feedback(flow_id, rtp->type))
+		return;
+#endif
 	if(!options.quiet) {
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s]  -- [%s][flow=%"SCNu64"][%zu] ssrc=%"SCNu32", pt=%d, seq=%"SCNu16", ts=%"SCNu32"\n",
 			imquic_get_connection_name(conn), imquic_roq_multiplexing_str(multiplexing), flow_id, blen,
@@ -256,6 +286,7 @@ int main(int argc, char *argv[]) {
 			.video_flow = options.video_flow,
 			.video_pt = (uint8_t)options.video_pt,
 			.video_codec = video_codec,
+			.svc_temporal_layers = options.svc_temporal_layers > 0 ? options.svc_temporal_layers : 2,
 			.svc_max_temporal_layer = options.svc_max_temporal_layer,
 			.svc_max_spatial_layer = options.svc_max_spatial_layer,
 			.no_svc_adaptive = options.no_svc_adaptive,
@@ -269,6 +300,14 @@ int main(int argc, char *argv[]) {
 		if(roq_display_init(&display_cfg) < 0) {
 			ret = 1;
 			goto done;
+		}
+		imquic_roq_rtp_state_init(&svc_feedback_rtp, IMQUIC_ROQ_SVC_FEEDBACK_PAYLOAD_TYPE,
+			(uint32_t)g_random_int());
+		roq_display_set_svc_feedback_cb(imquic_demo_send_svc_feedback, NULL);
+		if(moq_loc_svc_is_svc_codec(video_codec) && !options.no_svc_adaptive &&
+				options.svc_max_temporal_layer < 0) {
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC end-to-end adaptive layer selection enabled (feedback flow=%d, pt=%d)\n",
+				IMQUIC_ROQ_SVC_FEEDBACK_FLOW_ID, IMQUIC_ROQ_SVC_FEEDBACK_PAYLOAD_TYPE);
 		}
 	}
 #endif

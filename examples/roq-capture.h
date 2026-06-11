@@ -44,6 +44,7 @@ typedef void (*roq_capture_rtp_cb)(uint64_t flow_id, uint8_t *rtp, size_t rtp_le
 int roq_capture_init(const roq_capture_config *config, roq_capture_rtp_cb cb, void *user_data);
 void roq_capture_set_abr(struct moq_loc_abr *abr);
 void roq_capture_set_svc_abr(struct moq_loc_svc_abr *svc_abr);
+void roq_capture_set_remote_max_temporal_layer(int max_layer);
 void roq_capture_start(void);
 void roq_capture_pause(void);
 void roq_capture_destroy(void);

@@ -82,4 +82,15 @@ gboolean imquic_roq_rtp_depay_vp9(imquic_roq_vp9_depay *depay,
 	const uint8_t *payload, size_t payload_len, uint16_t seq, uint32_t timestamp,
 	uint8_t **frame, size_t *frame_len);
 
+/* RoQ SVC layer feedback (receiver -> sender) */
+#define IMQUIC_ROQ_SVC_FEEDBACK_FLOW_ID 99
+#define IMQUIC_ROQ_SVC_FEEDBACK_PAYLOAD_TYPE 127
+
+size_t imquic_roq_rtp_build_svc_feedback(imquic_roq_rtp_state *state, uint8_t *buffer, size_t blen,
+	uint8_t max_temporal_layer);
+
+gboolean imquic_roq_rtp_is_svc_feedback(uint64_t flow_id, uint8_t payload_type);
+
+gboolean imquic_roq_rtp_parse_svc_feedback(uint8_t *rtp, size_t rtp_len, uint8_t *max_temporal_layer);
+
 #endif

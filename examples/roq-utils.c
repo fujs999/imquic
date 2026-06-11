@@ -262,3 +262,48 @@ gboolean imquic_roq_rtp_depay_vp9(imquic_roq_vp9_depay *depay,
 	depay->in_frame = FALSE;
 	return TRUE;
 }
+
+#define IMQUIC_ROQ_SVC_FEEDBACK_MAGIC 0x46435653
+
+size_t imquic_roq_rtp_build_svc_feedback(imquic_roq_rtp_state *state, uint8_t *buffer, size_t blen,
+		uint8_t max_temporal_layer) {
+	uint8_t payload[8];
+	uint32_t magic = htonl(IMQUIC_ROQ_SVC_FEEDBACK_MAGIC);
+	if(state == NULL || buffer == NULL)
+		return 0;
+	memcpy(payload, &magic, 4);
+	payload[4] = 1;
+	payload[5] = max_temporal_layer;
+	payload[6] = 0;
+	payload[7] = 0;
+	return imquic_roq_rtp_build_packet(state, buffer, blen, payload, sizeof(payload), TRUE, 0);
+}
+
+gboolean imquic_roq_rtp_is_svc_feedback(uint64_t flow_id, uint8_t payload_type) {
+	return flow_id == IMQUIC_ROQ_SVC_FEEDBACK_FLOW_ID &&
+		payload_type == IMQUIC_ROQ_SVC_FEEDBACK_PAYLOAD_TYPE;
+}
+
+gboolean imquic_roq_rtp_parse_svc_feedback(uint8_t *rtp, size_t rtp_len, uint8_t *max_temporal_layer) {
+	size_t payload_len = 0;
+	size_t payload_offset = 0;
+	uint32_t magic = 0;
+	const uint8_t *payload = NULL;
+	if(rtp == NULL || rtp_len < 12 + 8 || max_temporal_layer == NULL)
+		return FALSE;
+	if(!imquic_roq_is_rtp(rtp, (guint)rtp_len))
+		return FALSE;
+	payload_offset = 12;
+	if(payload_offset > rtp_len)
+		return FALSE;
+	payload_len = rtp_len - payload_offset;
+	if(payload_len < 8)
+		return FALSE;
+	payload = rtp + payload_offset;
+	memcpy(&magic, payload, 4);
+	magic = ntohl(magic);
+	if(magic != IMQUIC_ROQ_SVC_FEEDBACK_MAGIC || payload[4] != 1)
+		return FALSE;
+	*max_temporal_layer = payload[5];
+	return TRUE;
+}

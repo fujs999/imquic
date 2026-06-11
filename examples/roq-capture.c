@@ -56,6 +56,7 @@ static moq_loc_abr *abr = NULL;
 static moq_loc_svc_abr *svc_abr = NULL;
 static moq_loc_svc_config svc_cfg = { 0 };
 static imquic_demo_video_codec video_codec_id = DEMO_H264_ANNEXB;
+static volatile int remote_max_temporal_layer = -1;
 static int applied_enc_generation = 0, applied_audio_bitrate = 0;
 static int enc_target_width = 0, enc_target_height = 0, enc_target_fps = 0;
 static volatile int force_video_keyframe = 0;
@@ -239,6 +240,26 @@ void roq_capture_set_abr(moq_loc_abr *controller) {
 
 void roq_capture_set_svc_abr(moq_loc_svc_abr *controller) {
 	svc_abr = controller;
+}
+
+void roq_capture_set_remote_max_temporal_layer(int max_layer) {
+	g_atomic_int_set(&remote_max_temporal_layer, max_layer);
+}
+
+static int roq_capture_effective_max_temporal_layer(void) {
+	int local_max = svc_cfg.max_send_temporal_layer;
+	int remote_max = g_atomic_int_get(&remote_max_temporal_layer);
+	if(svc_abr != NULL)
+		local_max = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
+	if(remote_max >= 0 && remote_max < local_max)
+		local_max = remote_max;
+	return local_max;
+}
+
+static void roq_capture_apply_svc_send_layer(void) {
+	if(!svc_cfg.enabled)
+		return;
+	svc_cfg.max_send_temporal_layer = roq_capture_effective_max_temporal_layer();
 }
 
 static int roq_capture_create_audio(void) {
@@ -654,8 +675,7 @@ static void *roq_capture_video_enc_thread(void *user_data) {
 		moq_loc_svc_layer layer = { 0 };
 		gboolean svc = moq_loc_svc_is_svc_codec(video_codec_id);
 		if(svc) {
-			if(svc_abr != NULL)
-				svc_cfg.max_send_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
+			roq_capture_apply_svc_send_layer();
 			if(moq_loc_svc_parse_packet(video_codec_id, packet.data, (size_t)packet.size, FALSE, &layer) < 0) {
 				layer.temporal_id = 0;
 				layer.spatial_id = 0;
