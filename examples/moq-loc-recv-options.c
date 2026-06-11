@@ -13,6 +13,8 @@
 static GOptionContext *opts = NULL;
 
 gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
+	options->svc_max_temporal_layer = -1;
+	options->svc_max_spatial_layer = -1;
 	/* Supported command-line arguments */
 	GOptionEntry opt_entries[] = {
 		{ "moq-draft-version", 'M', 0, G_OPTION_ARG_STRING, &options->moq_version, "MoQ draft version number to negotiate (default=any)", "<number>|any" },
@@ -21,7 +23,9 @@ gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
 		{ "use-catalog", 'u', 0, G_OPTION_ARG_NONE, &options->use_catalog, "If set, will get the published catalog to autodetect audio and video tracks to subscribe to (default=no)", NULL},
 		{ "audio-track-name", 'A', 0, G_OPTION_ARG_STRING, &options->audio_track_name, "MoQ track name of the audio track to subscribe to (default=autodetect when using catalog, otherwise no audio)", "name" },
 		{ "video-track-name", 'V', 0, G_OPTION_ARG_STRING, &options->video_track_name, "MoQ track name of the video track to subscribe to (default=autodetect when using catalog, otherwise no video)", "name" },
-		{ "video-codec", 'e', 0, G_OPTION_ARG_STRING, &options->video_codec, "Video codec to use (default=autodetect when using catalog, otherwise h264-avcc)", "h264-avcc|h264-annexb|vp8|vp9|av1" },
+		{ "video-codec", 'e', 0, G_OPTION_ARG_STRING, &options->video_codec, "Video codec to use (default=autodetect when using catalog, otherwise h264-avcc)", "h264-avcc|h264-annexb|h264-svc|vp8|vp9|vp9-svc|av1" },
+		{ "svc-max-temporal-layer", 'T', 0, G_OPTION_ARG_INT, &options->svc_max_temporal_layer, "Maximum SVC temporal layer to decode (-1=all, default=-1)", "0-3" },
+		{ "svc-max-spatial-layer", 0, 0, G_OPTION_ARG_INT, &options->svc_max_spatial_layer, "Maximum SVC spatial layer to decode (-1=all, default=-1)", "0-2" },
 		{ "bind", 'b', 0, G_OPTION_ARG_STRING, &options->ip, "Local IP address to bind to (default=all interfaces)", "IP" },
 		{ "port", 'p', 0, G_OPTION_ARG_INT, &options->port, "Local port to bind to (default=0, random)", "port" },
 		{ "remote-host", 'r', 0, G_OPTION_ARG_STRING, &options->remote_host, "QUIC server to connect to (default=none)", "IP" },

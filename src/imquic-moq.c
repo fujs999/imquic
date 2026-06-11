@@ -1258,6 +1258,10 @@ imquic_moq_catalog *imquic_moq_catalog_parse(const char *json) {
 		track->role = r ? g_strdup(json_string_value(r)) : NULL;
 		json_t *rg = json_object_get(t, "renderGroup");
 		track->render_group = rg ? json_integer_value(rg) : 0;
+		json_t *tid = json_object_get(t, "temporalId");
+		track->temporal_id = tid ? json_integer_value(tid) : 0;
+		json_t *sid = json_object_get(t, "spatialId");
+		track->spatial_id = sid ? json_integer_value(sid) : 0;
 		json_t *c = json_object_get(t, "codec");
 		track->codec = c ? g_strdup(json_string_value(c)) : NULL;
 		json_t *s = json_object_get(t, "samplerate");
@@ -1366,6 +1370,10 @@ json_t *imquic_moq_catalog_serialize_obj(imquic_moq_catalog *catalog) {
 			json_object_set_new(t, "role", json_string(track->role));
 		if(track->render_group > 0)
 			json_object_set_new(t, "renderGroup", json_integer(track->render_group));
+		if(track->temporal_id > 0)
+			json_object_set_new(t, "temporalId", json_integer(track->temporal_id));
+		if(track->spatial_id > 0)
+			json_object_set_new(t, "spatialId", json_integer(track->spatial_id));
 		if(track->codec != NULL)
 			json_object_set_new(t, "codec", json_string(track->codec));
 		if(track->samplerate > 0)

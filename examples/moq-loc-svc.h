@@ -1,0 +1,60 @@
+/*
+ * imquic
+ *
+ * Scalable Video Coding (SVC) helpers for MoQ LOC demos
+ *
+ */
+
+#ifndef MOQ_LOC_SVC_H
+#define MOQ_LOC_SVC_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#include <glib.h>
+#include <imquic/moq.h>
+
+#include "moq-utils.h"
+
+#define MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS 4
+#define MOQ_LOC_SVC_MAX_SPATIAL_LAYERS   3
+
+typedef struct moq_loc_svc_layer {
+	uint8_t temporal_id;
+	uint8_t spatial_id;
+	gboolean is_keyframe;
+} moq_loc_svc_layer;
+
+typedef struct moq_loc_svc_config {
+	gboolean enabled;
+	imquic_demo_video_codec codec;
+	int temporal_layers;
+	int spatial_layers;
+	int max_send_temporal_layer;
+} moq_loc_svc_config;
+
+void moq_loc_svc_config_init(moq_loc_svc_config *cfg);
+gboolean moq_loc_svc_config_validate(const moq_loc_svc_config *cfg);
+
+uint64_t moq_loc_svc_subgroup_id(uint8_t spatial_id, uint8_t temporal_id);
+void moq_loc_svc_unpack_subgroup(uint64_t subgroup_id, uint8_t *spatial_id, uint8_t *temporal_id);
+
+uint64_t moq_loc_svc_frame_marking_value(const moq_loc_svc_layer *layer);
+gboolean moq_loc_svc_layer_from_frame_marking(uint64_t value, moq_loc_svc_layer *layer);
+
+gboolean moq_loc_svc_layer_from_properties(GList *properties, moq_loc_svc_layer *layer);
+void moq_loc_svc_set_frame_marking(imquic_moq_property *prop, const moq_loc_svc_layer *layer);
+
+int moq_loc_svc_parse_packet(imquic_demo_video_codec codec, const uint8_t *data, size_t len,
+	gboolean avcc, moq_loc_svc_layer *layer);
+
+const char *moq_loc_svc_catalog_codec(imquic_demo_video_codec codec);
+
+gboolean moq_loc_svc_is_svc_codec(imquic_demo_video_codec codec);
+
+gboolean moq_loc_svc_object_within_layer(imquic_demo_video_codec codec, imquic_moq_object *object,
+	int max_temporal_layer, int max_spatial_layer);
+
+int moq_loc_svc_object_temporal_layer(imquic_moq_object *object);
+
+#endif

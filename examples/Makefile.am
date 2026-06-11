@@ -44,6 +44,8 @@ imquic_moq_relay_SOURCES = \
 	moq-relay.c \
 	moq-relay-options.c \
 	moq-relay-options.h \
+	moq-loc-svc.c \
+	moq-loc-svc.h \
 	moq-utils.c \
 	moq-utils.h
 imquic_moq_relay_CFLAGS = \
@@ -116,6 +118,8 @@ imquic_moq_loc_send_SOURCES = \
 	moq-loc-send.c \
 	moq-loc-abr.c \
 	moq-loc-abr.h \
+	moq-loc-svc.c \
+	moq-loc-svc.h \
 	moq-loc-send-options.c \
 	moq-loc-send-options.h \
 	moq-utils.c \
@@ -135,6 +139,8 @@ imquic_moq_loc_send_LDADD = \
 
 imquic_moq_loc_recv_SOURCES = \
 	moq-loc-recv.c \
+	moq-loc-svc.c \
+	moq-loc-svc.h \
 	moq-loc-recv-options.c \
 	moq-loc-recv-options.h \
 	moq-utils.c \

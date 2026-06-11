@@ -29,6 +29,7 @@
 #include <SDL2/SDL_ttf.h>
 
 #include "moq-loc-recv-options.h"
+#include "moq-loc-svc.h"
 #include "moq-utils.h"
 
 /* Command line options */
@@ -136,6 +137,10 @@ typedef struct imquic_demo_video_object_stats {
 } imquic_demo_video_object_stats;
 
 static imquic_demo_video_object_stats video_object_stats = { 0 };
+static int svc_max_temporal_layer = -1;
+static int svc_max_spatial_layer = -1;
+static int svc_publisher_max_temporal = -1;
+static int svc_current_temporal_layer = 0;
 static imquic_mutex stats_mutex = IMQUIC_MUTEX_INITIALIZER;
 static imquic_connection *stats_conn = NULL;
 static uint32_t objects_lost_display = 0;
@@ -226,7 +231,7 @@ static int imquic_demo_decode_video(uint8_t *buffer, size_t length, gboolean key
 		got_keyframe = TRUE;
 	}
 	/* Check of we need to switch from AVCC to Annex-B */
-	if(codec == DEMO_H264_AVCC) {
+	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_SVC) {
 		size_t avcc_offset = 0, nal_size = 0;
 		while(length >= avcc_offset + 4) {
 			memcpy(&nal_size, buffer + avcc_offset, 4);
@@ -364,6 +369,16 @@ static void imquic_demo_process_video_buffer(void) {
 					loc_extradata = &prop->value.data;
 					break;
 				}
+				case IMQUIC_MOQ_LOC_VIDEO_FRAME_MARKING: {
+					moq_loc_svc_layer layer = { 0 };
+					if(moq_loc_svc_layer_from_frame_marking(prop->value.number, &layer)) {
+						svc_current_temporal_layer = layer.temporal_id;
+						IMQUIC_LOG(IMQUIC_LOG_LOCPROP, "  -- -- %s: temporal=%d spatial=%d keyframe=%d\n",
+							imquic_moq_property_type_str(moq_version, prop->id),
+							layer.temporal_id, layer.spatial_id, layer.is_keyframe);
+					}
+					break;
+				}
 				default: {
 					break;
 				}
@@ -372,11 +387,11 @@ static void imquic_demo_process_video_buffer(void) {
 		}
 		gboolean keyframe = (loc_extradata != NULL);
 		if(!keyframe) {
-			if(codec == DEMO_H264_ANNEXB)
+			if(codec == DEMO_H264_ANNEXB || codec == DEMO_H264_SVC)
 				keyframe = imquic_demo_h264_is_keyframe(object->payload, object->payload_len);
 			else if(codec == DEMO_VP8)
 				keyframe = imquic_demo_vp8_is_keyframe(object->payload, object->payload_len);
-			else if(codec == DEMO_VP9)
+			else if(codec == DEMO_VP9 || codec == DEMO_VP9_SVC)
 				keyframe = imquic_demo_vp9_is_keyframe(object->payload, object->payload_len);
 			if(codec == DEMO_AV1)
 				keyframe = imquic_demo_av1_is_keyframe(object->payload, object->payload_len);
@@ -384,6 +399,10 @@ static void imquic_demo_process_video_buffer(void) {
 		if(imquic_demo_ensure_video_decoder(loc_extradata, keyframe) < 0) {
 			g_atomic_int_inc(&stop);
 			return;
+		}
+		if(!moq_loc_svc_object_within_layer(codec, object, svc_max_temporal_layer, svc_max_spatial_layer)) {
+			temp = temp->next;
+			continue;
 		}
 		gboolean render = (temp->next == NULL);
 		imquic_demo_decode_video(object->payload, object->payload_len, keyframe, render);
@@ -690,20 +709,26 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 					video_tn = imquic_moq_track_str(video_trackname, video_tn_buffer, sizeof(video_tn_buffer));
 					IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Using track name '%s' for video\n", video_tn);
 					codec = DEMO_UNKOWN;
-					if(track->codec && strstr(track->codec, "avc1") != NULL) {
+					if(track->codec && (strstr(track->codec, "534") != NULL || strstr(track->codec, ".svc") != NULL)) {
+						codec = DEMO_H264_SVC;
+						video_codec = (AVCodec *)avcodec_find_decoder_by_name("h264");
+					} else if(track->codec && strstr(track->codec, "avc1") != NULL) {
 						codec = DEMO_H264_AVCC;
 						video_codec = (AVCodec *)avcodec_find_decoder_by_name("h264");
 					} else if(track->codec && strstr(track->codec, "annexb") != NULL) {
 						codec = DEMO_H264_ANNEXB;
 						video_codec = (AVCodec *)avcodec_find_decoder_by_name("h264");
+					} else if(track->codec && strstr(track->codec, "vp9.svc") != NULL) {
+						codec = DEMO_VP9_SVC;
+						video_codec = (AVCodec *)avcodec_find_decoder_by_name("libvpx-vp9");
 					} else if(track->codec && strstr(track->codec, "vp8") != NULL) {
 						codec = DEMO_VP8;
 						video_codec = (AVCodec *)avcodec_find_decoder_by_name("libvpx");
 					} else if(track->codec && strstr(track->codec, "vp9") != NULL) {
-						codec = DEMO_VP8;
+						codec = DEMO_VP9;
 						video_codec = (AVCodec *)avcodec_find_decoder_by_name("libvpx-vp9");
 					} else if(track->codec && strstr(track->codec, "av1") != NULL) {
-						codec = DEMO_VP8;
+						codec = DEMO_AV1;
 						video_codec = (AVCodec *)avcodec_find_decoder_by_name("libaom-av1");
 					}
 					if(codec == DEMO_UNKOWN) {
@@ -724,6 +749,12 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 					video_catalog_height = track->height;
 					video_catalog_framerate = track->framerate;
 					video_catalog_bitrate = track->bitrate;
+					if(track->temporal_id > 0)
+						svc_publisher_max_temporal = track->temporal_id;
+					if(moq_loc_svc_is_svc_codec(codec)) {
+						IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- SVC track detected (publisher max temporal=%d)\n",
+							svc_publisher_max_temporal);
+					}
 				} else {
 					IMQUIC_LOG(IMQUIC_LOG_WARN, "  -- Unsupported '%s' track\n", track->role);
 				}
@@ -788,6 +819,16 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 						loc_extradata->length);
 					break;
 				}
+				case IMQUIC_MOQ_LOC_VIDEO_FRAME_MARKING: {
+					moq_loc_svc_layer layer = { 0 };
+					if(moq_loc_svc_layer_from_frame_marking(prop->value.number, &layer)) {
+						svc_current_temporal_layer = layer.temporal_id;
+						IMQUIC_LOG(IMQUIC_LOG_LOCPROP, "  -- -- %s: temporal=%d spatial=%d keyframe=%d\n",
+							imquic_moq_property_type_str(moq_version, prop->id),
+							layer.temporal_id, layer.spatial_id, layer.is_keyframe);
+					}
+					break;
+				}
 				default: {
 					IMQUIC_LOG(IMQUIC_LOG_WARN, "  -- -- Unknown property '%"SCNu32"'\n", prop->id);
 					break;
@@ -825,6 +866,13 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 		} else if(video_tn != NULL &&
 				((object->track_alias == video_track_alias && object->delivery != IMQUIC_MOQ_USE_FETCH) ||
 				(object->request_id == video_fetch_request_id && object->delivery == IMQUIC_MOQ_USE_FETCH))) {
+			/* SVC layer filtering on the receiver */
+			if(!moq_loc_svc_object_within_layer(codec, object, svc_max_temporal_layer, svc_max_spatial_layer)) {
+				IMQUIC_LOG(IMQUIC_LOG_VERB, "[%s] Skipping SVC object on subgroup %"SCNu64" (max T=%d S=%d)\n",
+					imquic_get_connection_name(conn), object->subgroup_id,
+					svc_max_temporal_layer, svc_max_spatial_layer);
+				return;
+			}
 			/* Check if we're still caching stuff due to the FETCH catch-up */
 			if(object->delivery == IMQUIC_MOQ_USE_SUBGROUP && video_fetch_request_id > 0 && !video_fetch_completed) {
 				/* We need to just buffer this frame for a while, as we first have to
@@ -837,11 +885,11 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 			/* Check if it's a keyframe, looking in the payload if needed */
 			gboolean keyframe = (loc_extradata != NULL);
 			if(!keyframe) {
-				if(codec == DEMO_H264_ANNEXB)
+				if(codec == DEMO_H264_ANNEXB || codec == DEMO_H264_SVC)
 					keyframe = imquic_demo_h264_is_keyframe(object->payload, object->payload_len);
 				else if(codec == DEMO_VP8)
 					keyframe = imquic_demo_vp8_is_keyframe(object->payload, object->payload_len);
-				else if(codec == DEMO_VP9)
+				else if(codec == DEMO_VP9 || codec == DEMO_VP9_SVC)
 					keyframe = imquic_demo_vp9_is_keyframe(object->payload, object->payload_len);
 				if(codec == DEMO_AV1)
 					keyframe = imquic_demo_av1_is_keyframe(object->payload, object->payload_len);
@@ -1065,6 +1113,12 @@ static void imquic_demo_render_video_overlay(SDL_Renderer *r) {
 		lines[line_count] = line_bufs[line_count];
 		line_count++;
 	}
+	if(moq_loc_svc_is_svc_codec(codec)) {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]),
+			"SVC layer: T%d (max=%d)", svc_current_temporal_layer, svc_max_temporal_layer);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
 	if(fps > 0.0) {
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "FPS: %.1f", fps);
 		lines[line_count] = line_bufs[line_count];
@@ -1246,6 +1300,12 @@ int main(int argc, char *argv[]) {
 		imquic_set_refcount_debugging(TRUE);
 	if(options.debug_loc_properties && !options.quiet)
 		IMQUIC_LOG_LOCPROP = IMQUIC_LOG_INFO;
+	svc_max_temporal_layer = options.svc_max_temporal_layer;
+	svc_max_spatial_layer = options.svc_max_spatial_layer;
+	if(svc_max_temporal_layer >= 0 || svc_max_spatial_layer >= 0) {
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC layer filter: max temporal=%d, max spatial=%d\n",
+			svc_max_temporal_layer, svc_max_spatial_layer);
+	}
 
 	/* Initialize SDL backends */
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
@@ -1361,11 +1421,11 @@ int main(int argc, char *argv[]) {
 			}
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Will use video codec '%s'\n",
 				imquic_demo_video_codec_str(codec));
-			if(codec == DEMO_H264_AVCC || codec == DEMO_H264_ANNEXB) {
+			if(codec == DEMO_H264_AVCC || codec == DEMO_H264_ANNEXB || codec == DEMO_H264_SVC) {
 				video_codec = (AVCodec *)avcodec_find_decoder_by_name("h264");
 			} else if(codec == DEMO_VP8) {
 				video_codec = (AVCodec *)avcodec_find_decoder_by_name("libvpx");
-			} else if(codec == DEMO_VP9) {
+			} else if(codec == DEMO_VP9 || codec == DEMO_VP9_SVC) {
 				video_codec = (AVCodec *)avcodec_find_decoder_by_name("libvpx-vp9");
 			} else if(codec == DEMO_AV1) {
 				video_codec = (AVCodec *)avcodec_find_decoder_by_name("libaom-av1");

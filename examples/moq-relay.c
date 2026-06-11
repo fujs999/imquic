@@ -14,6 +14,7 @@
 #include <imquic/moq.h>
 
 #include "moq-relay-options.h"
+#include "moq-loc-svc.h"
 #include "moq-utils.h"
 
 /* Command line options */
@@ -1557,6 +1558,24 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 				temp = temp->next;
 				continue;
 			}
+			if(options.svc_max_temporal_layer >= 0 || options.svc_max_spatial_layer >= 0) {
+				moq_loc_svc_layer layer = { 0 };
+				uint8_t spatial = 0, temporal = 0;
+				if(moq_loc_svc_layer_from_properties(object->properties, &layer)) {
+					temporal = layer.temporal_id;
+					spatial = layer.spatial_id;
+				} else {
+					moq_loc_svc_unpack_subgroup(object->subgroup_id, &spatial, &temporal);
+				}
+				if(options.svc_max_temporal_layer >= 0 && temporal > (uint8_t)options.svc_max_temporal_layer) {
+					temp = temp->next;
+					continue;
+				}
+				if(options.svc_max_spatial_layer >= 0 && spatial > (uint8_t)options.svc_max_spatial_layer) {
+					temp = temp->next;
+					continue;
+				}
+			}
 			object->request_id = s->request_id;
 			object->track_alias = s->track_alias;
 			imquic_moq_send_object(s->sub->conn, object);
@@ -1625,6 +1644,10 @@ int main(int argc, char *argv[]) {
 		imquic_set_lock_debugging(TRUE);
 	if(options.debug_refcounts)
 		imquic_set_refcount_debugging(TRUE);
+	if(options.svc_max_temporal_layer >= 0 || options.svc_max_spatial_layer >= 0) {
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC relay filter: max temporal=%d, max spatial=%d\n",
+			options.svc_max_temporal_layer, options.svc_max_spatial_layer);
+	}
 
 	int ret = 0;
 	if(options.cert_pem == NULL || strlen(options.cert_pem) == 0 || options.cert_key == NULL || strlen(options.cert_key) == 0) {

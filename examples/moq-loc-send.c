@@ -30,6 +30,7 @@
 
 #include "moq-loc-send-options.h"
 #include "moq-loc-abr.h"
+#include "moq-loc-svc.h"
 #include "moq-utils.h"
 
 /* Command line options */
@@ -111,6 +112,7 @@ static imquic_mutex send_mutex = IMQUIC_MUTEX_INITIALIZER;
 
 /* Adaptive bitrate */
 static moq_loc_abr *abr = NULL;
+static moq_loc_svc_config svc_cfg = { 0 };
 static uint64_t send_ok_count = 0, send_fail_count = 0, video_bytes_sent = 0;
 static int applied_enc_generation = 0, applied_audio_bitrate = 0;
 static int enc_target_width = 0, enc_target_height = 0, enc_target_fps = 0;
@@ -151,6 +153,67 @@ static int imquic_demo_apply_video_bitrate(int bitrate) {
 	return 0;
 }
 
+static gboolean imquic_demo_encoder_option_available(AVCodecContext *ctx, const char *name) {
+	if(ctx == NULL || ctx->priv_data == NULL || name == NULL)
+		return FALSE;
+	return av_opt_find(ctx->priv_data, name, NULL, 0, AV_OPT_SEARCH_CHILDREN) != NULL;
+}
+
+static int imquic_demo_build_vp9_ts_parameters(char *buf, size_t buflen, int temporal_layers, int total_bitrate_bps) {
+	char br[128], dec[64];
+	int total_kbps = 0, i = 0, br_len = 0, dec_len = 0;
+	if(buf == NULL || buflen == 0 || temporal_layers < 2)
+		return -1;
+	total_kbps = total_bitrate_bps / 1024;
+	if(total_kbps < temporal_layers)
+		total_kbps = temporal_layers;
+	br[0] = '\0';
+	dec[0] = '\0';
+	for(i = 0; i < temporal_layers; i++) {
+		int layer_br = total_kbps / (1 << (temporal_layers - 1 - i));
+		int dec_val = 1 << (temporal_layers - 1 - i);
+		br_len += g_snprintf(br + br_len, sizeof(br) - br_len, "%s%d", i ? "," : "", layer_br);
+		dec_len += g_snprintf(dec + dec_len, sizeof(dec) - dec_len, "%s%d", i ? "," : "", dec_val);
+	}
+	return g_snprintf(buf, buflen,
+		"ts_number_layers=%d:ts_target_bitrate=%s:ts_rate_decimator=%s:ts_layering_mode=3",
+		temporal_layers, br, dec);
+}
+
+static void imquic_demo_configure_svc_encoder(AVCodecContext *ctx) {
+	char layers[8], ts_buf[256];
+	if(ctx == NULL || !svc_cfg.enabled)
+		return;
+	if(codec == DEMO_H264_SVC) {
+		av_opt_set(ctx->priv_data, "profile", "high", AV_OPT_SEARCH_CHILDREN);
+		av_opt_set_int(ctx->priv_data, "allow_skip_frames", 1, AV_OPT_SEARCH_CHILDREN);
+		g_snprintf(layers, sizeof(layers), "%d", svc_cfg.temporal_layers);
+		av_opt_set(ctx->priv_data, "slices", layers, AV_OPT_SEARCH_CHILDREN);
+	} else if(codec == DEMO_VP9_SVC) {
+		av_opt_set(ctx->priv_data, "lag-in-frames", "25", AV_OPT_SEARCH_CHILDREN);
+		av_opt_set_int(ctx->priv_data, "auto-alt-ref", 1, AV_OPT_SEARCH_CHILDREN);
+		av_opt_set(ctx->priv_data, "temporal-aq", "1", AV_OPT_SEARCH_CHILDREN);
+		if(imquic_demo_encoder_option_available(ctx, "ts-parameters")) {
+			if(imquic_demo_build_vp9_ts_parameters(ts_buf, sizeof(ts_buf),
+					svc_cfg.temporal_layers, (int)ctx->bit_rate) < 0 ||
+					av_opt_set(ctx->priv_data, "ts-parameters", ts_buf, AV_OPT_SEARCH_CHILDREN) < 0) {
+				IMQUIC_LOG(IMQUIC_LOG_WARN, "Failed to configure VP9 SVC via ts-parameters\n");
+			} else {
+				IMQUIC_LOG(IMQUIC_LOG_INFO, "VP9 SVC temporal scaling: %s\n", ts_buf);
+			}
+		} else if(imquic_demo_encoder_option_available(ctx, "vp9-temporal-layers")) {
+			IMQUIC_LOG(IMQUIC_LOG_WARN,
+				"VP9 SVC: ts-parameters not available, falling back to legacy vp9-temporal-layers\n");
+			g_snprintf(layers, sizeof(layers), "%d", svc_cfg.temporal_layers);
+			if(av_opt_set(ctx->priv_data, "vp9-temporal-layers", layers, AV_OPT_SEARCH_CHILDREN) < 0)
+				IMQUIC_LOG(IMQUIC_LOG_WARN, "Failed to set vp9-temporal-layers for VP9 SVC\n");
+		} else {
+			IMQUIC_LOG(IMQUIC_LOG_WARN,
+				"VP9 SVC: libvpx-vp9 lacks ts-parameters and vp9-temporal-layers, temporal scalability disabled\n");
+		}
+	}
+}
+
 static int imquic_demo_open_video_encoder_ctx(int width, int height, int fps, int bitrate) {
 	if(video_codec == NULL || width <= 0 || height <= 0 || fps <= 0 || bitrate <= 0)
 		return -1;
@@ -169,18 +232,23 @@ static int imquic_demo_open_video_encoder_ctx(int width, int height, int fps, in
 	videoenc_ctx->gop_size = fps * 2;
 	videoenc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 	videoenc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_ANNEXB) {
+	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_ANNEXB || codec == DEMO_H264_SVC) {
 		videoenc_ctx->profile = FF_PROFILE_H264_BASELINE;
 		videoenc_ctx->level = 41;
 	}
-	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_ANNEXB) {
+	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_ANNEXB || codec == DEMO_H264_SVC) {
 		char br[20];
 		g_snprintf(br, sizeof(br), "%"SCNi64, videoenc_ctx->bit_rate / 1024);
 		av_opt_set(videoenc_ctx->priv_data, "b", br, AV_OPT_SEARCH_CHILDREN);
-		av_opt_set(videoenc_ctx->priv_data, "crf", "23", AV_OPT_SEARCH_CHILDREN);
-		av_opt_set(videoenc_ctx->priv_data, "profile", "baseline", 0);
-		av_opt_set(videoenc_ctx->priv_data, "preset", "ultrafast", 0);
-		av_opt_set(videoenc_ctx->priv_data, "tune", "zerolatency", 0);
+		if(codec == DEMO_H264_SVC) {
+			av_opt_set(videoenc_ctx->priv_data, "preset", "ultrafast", 0);
+			av_opt_set(videoenc_ctx->priv_data, "tune", "zerolatency", 0);
+		} else {
+			av_opt_set(videoenc_ctx->priv_data, "crf", "23", AV_OPT_SEARCH_CHILDREN);
+			av_opt_set(videoenc_ctx->priv_data, "profile", "baseline", 0);
+			av_opt_set(videoenc_ctx->priv_data, "preset", "ultrafast", 0);
+			av_opt_set(videoenc_ctx->priv_data, "tune", "zerolatency", 0);
+		}
 	} else if(codec == DEMO_VP8) {
 		char br[20];
 		g_snprintf(br, sizeof(br), "%d", bitrate / 1024);
@@ -189,18 +257,22 @@ static int imquic_demo_open_video_encoder_ctx(int width, int height, int fps, in
 		av_opt_set_double(videoenc_ctx->priv_data, "max-intra-rate", 300, 0);
 		av_opt_set(videoenc_ctx->priv_data, "quality", "realtime", 0);
 		av_opt_set(videoenc_ctx->priv_data, "threads", "2", 0);
-	} else if(codec == DEMO_VP9) {
+	} else if(codec == DEMO_VP9 || codec == DEMO_VP9_SVC) {
 		char br[20];
 		g_snprintf(br, sizeof(br), "%d", bitrate / 1024);
 		av_opt_set(videoenc_ctx->priv_data, "b", br, 0);
 		av_opt_set(videoenc_ctx->priv_data, "speed", "7", 0);
 		av_opt_set_double(videoenc_ctx->priv_data, "max-intra-rate", 300, 0);
 		av_opt_set(videoenc_ctx->priv_data, "quality", "realtime", 0);
-		av_opt_set(videoenc_ctx->priv_data, "lag-in-frames", "0", 0);
+		if(codec == DEMO_VP9) {
+			av_opt_set(videoenc_ctx->priv_data, "lag-in-frames", "0", 0);
+		}
 		av_opt_set(videoenc_ctx->priv_data, "tile-columns", "2", 0);
 		av_opt_set(videoenc_ctx->priv_data, "row-mt", "1", 0);
 		av_opt_set(videoenc_ctx->priv_data, "threads", "2", 0);
 	}
+	if(moq_loc_svc_is_svc_codec(codec))
+		imquic_demo_configure_svc_encoder(videoenc_ctx);
 	if(avcodec_open2(videoenc_ctx, video_codec, NULL) < 0) {
 		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error opening video encoder\n");
 		avcodec_free_context(&videoenc_ctx);
@@ -217,7 +289,7 @@ static int imquic_demo_open_video_encoder_ctx(int width, int height, int fps, in
 static void imquic_demo_apply_abr_video_config(void) {
 	moq_loc_abr_config cfg = { 0 };
 	int generation = 0;
-	if(abr == NULL)
+	if(abr == NULL || moq_loc_svc_is_svc_codec(codec))
 		return;
 	generation = moq_loc_abr_config_generation(abr);
 	if(generation == applied_enc_generation)
@@ -708,9 +780,28 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 		}
 		/* Video frame encoded */
 		gboolean kf = (packet.flags & AV_PKT_FLAG_KEY);
-		IMQUIC_LOG(IMQUIC_LOG_VERB, "  -- Encoded to %d bytes, %s\n",
-			packet.size, kf ? "keyframe" : "NOT a keyframe");
-		if(kf) {
+		moq_loc_svc_layer layer = { 0 };
+		gboolean svc = moq_loc_svc_is_svc_codec(codec);
+		if(svc) {
+			gboolean avcc = (codec == DEMO_H264_SVC || codec == DEMO_H264_AVCC);
+			if(moq_loc_svc_parse_packet(codec, packet.data, packet.size, avcc, &layer) < 0) {
+				layer.temporal_id = 0;
+				layer.spatial_id = 0;
+				layer.is_keyframe = kf;
+			} else if(!layer.is_keyframe) {
+				layer.is_keyframe = kf;
+			}
+			if(layer.temporal_id > svc_cfg.max_send_temporal_layer) {
+				IMQUIC_LOG(IMQUIC_LOG_VERB, "  -- Dropping SVC layer T%d (max=%d)\n",
+					layer.temporal_id, svc_cfg.max_send_temporal_layer);
+				av_packet_unref(&packet);
+				continue;
+			}
+		}
+		IMQUIC_LOG(IMQUIC_LOG_VERB, "  -- Encoded to %d bytes, %s%s\n",
+			packet.size, kf ? "keyframe" : "NOT a keyframe",
+			svc ? " (SVC)" : "");
+		if(kf && (!svc || layer.temporal_id == 0)) {
 			/* Keyframe, we'll start a new group */
 			if(video_group_id > 0) {
 				/* Close the previous stream first */
@@ -718,7 +809,8 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 					.request_id = video_request_id,
 					.track_alias = video_track_alias,
 					.group_id = video_group_id,
-					.subgroup_id = 0,	/* FIXME */
+					.subgroup_id = moq_loc_svc_is_svc_codec(codec) ?
+						moq_loc_svc_subgroup_id(layer.spatial_id, layer.temporal_id) : 0,
 					.object_id = video_object_id,
 					.payload = NULL,
 					.payload_len = 0,
@@ -732,7 +824,7 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 			video_object_id = 0;
 		}
 		/* Check if we need to switch from Annex-B to AVCC */
-		if(codec == DEMO_H264_AVCC) {
+		if(codec == DEMO_H264_AVCC || codec == DEMO_H264_SVC) {
 			size_t annexb_offset = 0, index = 4, nal_size = 0;
 			while((size_t)packet.size >= index) {
 				if(packet.data[index] == 0x00 && packet.data[index+1] == 0x00 &&
@@ -761,11 +853,12 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 		props = g_list_append(props, &timestamp);
 		video_ts += wait;
 		imquic_moq_property videoconfig = { 0 };
+		imquic_moq_property frame_marking = { 0 };
 		uint8_t avcc_data[1500];
 		if(kf && videoenc_ctx->extradata != NULL) {
 			uint8_t *extradata = videoenc_ctx->extradata;
 			size_t extradata_size = videoenc_ctx->extradata_size;
-			if(codec == DEMO_H264_AVCC) {
+			if(codec == DEMO_H264_AVCC || codec == DEMO_H264_SVC) {
 				/* We need to convert the extradata to AVCC format */
 				size_t avcc_size = imquic_demo_h264_spspps_to_avcc(avcc_data, videoenc_ctx->extradata, videoenc_ctx->extradata_size);
 				if(avcc_size > 0) {
@@ -783,12 +876,16 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 			videoconfig.value.data.length = extradata_size;
 			props = g_list_append(props, &videoconfig);
 		}
+		if(svc) {
+			moq_loc_svc_set_frame_marking(&frame_marking, &layer);
+			props = g_list_append(props, &frame_marking);
+		}
 		/* Prepare a MoQ object and send it */
 		imquic_moq_object object = {
 			.request_id = video_request_id,
 			.track_alias = video_track_alias,
 			.group_id = video_group_id,
-			.subgroup_id = 0,	/* FIXME */
+			.subgroup_id = svc ? moq_loc_svc_subgroup_id(layer.spatial_id, layer.temporal_id) : 0,
 			.object_id = video_object_id,
 			.payload = packet.data,
 			.payload_len = packet.size,
@@ -812,12 +909,24 @@ static void *imquic_demo_abr_thread(void *user_data) {
 	while(!stop) {
 		if(abr != NULL && moq_conn != NULL && g_atomic_int_get(&video_started)) {
 			uint64_t ok = 0, fail = 0, bytes = 0;
+			moq_loc_abr_stats stats = { 0 };
 			imquic_mutex_lock(&send_mutex);
 			ok = send_ok_count;
 			fail = send_fail_count;
 			bytes = video_bytes_sent;
 			imquic_mutex_unlock(&send_mutex);
 			moq_loc_abr_update(abr, moq_conn, ok, fail, bytes);
+			if(moq_loc_svc_is_svc_codec(codec) && svc_cfg.enabled) {
+				moq_loc_abr_get_stats(abr, &stats);
+				if(stats.level >= 0 && svc_cfg.temporal_layers > 0) {
+					int max_layer = svc_cfg.temporal_layers - 1 - stats.level;
+					if(max_layer < 0)
+						max_layer = 0;
+					if(max_layer >= svc_cfg.temporal_layers)
+						max_layer = svc_cfg.temporal_layers - 1;
+					svc_cfg.max_send_temporal_layer = max_layer;
+				}
+			}
 		}
 		g_usleep(500000);
 	}
@@ -1253,11 +1362,16 @@ int main(int argc, char *argv[]) {
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Will use video codec '%s'\n",
 			imquic_demo_video_codec_str(codec));
 		if(codec == DEMO_H264_AVCC || codec == DEMO_H264_ANNEXB) {
-			/* FIXME Should we try openh264 too? */
 			video_codec = (AVCodec *)avcodec_find_encoder_by_name("libx264");
+		} else if(codec == DEMO_H264_SVC) {
+			video_codec = (AVCodec *)avcodec_find_encoder_by_name("libopenh264");
+			if(video_codec == NULL) {
+				IMQUIC_LOG(IMQUIC_LOG_WARN, "libopenh264 not found, falling back to libx264 (non-SVC)\n");
+				video_codec = (AVCodec *)avcodec_find_encoder_by_name("libx264");
+			}
 		} else if(codec == DEMO_VP8) {
 			video_codec = (AVCodec *)avcodec_find_encoder_by_name("libvpx");
-		} else if(codec == DEMO_VP9) {
+		} else if(codec == DEMO_VP9 || codec == DEMO_VP9_SVC) {
 			video_codec = (AVCodec *)avcodec_find_encoder_by_name("libvpx-vp9");
 		} else if(codec == DEMO_AV1) {
 			video_codec = (AVCodec *)avcodec_find_encoder_by_name("libaom-av1");
@@ -1266,6 +1380,23 @@ int main(int argc, char *argv[]) {
 			IMQUIC_LOG(IMQUIC_LOG_FATAL, "Video codec '%s' not supported in provided libavcodec\n", options.video_codec);
 			ret = 1;
 			goto done;
+		}
+		if(moq_loc_svc_is_svc_codec(codec)) {
+			moq_loc_svc_config_init(&svc_cfg);
+			svc_cfg.enabled = TRUE;
+			svc_cfg.codec = codec;
+			if(options.svc_temporal_layers > 0)
+				svc_cfg.temporal_layers = options.svc_temporal_layers;
+			if(options.svc_spatial_layers > 0)
+				svc_cfg.spatial_layers = options.svc_spatial_layers;
+			svc_cfg.max_send_temporal_layer = svc_cfg.temporal_layers - 1;
+			if(!moq_loc_svc_config_validate(&svc_cfg)) {
+				IMQUIC_LOG(IMQUIC_LOG_FATAL, "Invalid SVC configuration\n");
+				ret = 1;
+				goto done;
+			}
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- SVC enabled: %d temporal layer(s), %d spatial layer(s)\n",
+				svc_cfg.temporal_layers, svc_cfg.spatial_layers);
 		}
 		/* Add the video track to the catalog */
 		imquic_moq_catalog_track *track = imquic_moq_catalog_create_track(pub_tns, video_tn, "loc", TRUE);
@@ -1276,11 +1407,19 @@ int main(int argc, char *argv[]) {
 			track->codec = g_strdup("avc1.42001F");
 		else if(codec == DEMO_H264_ANNEXB)	/* FIXME */
 			track->codec = g_strdup("annexb.42001F");
-		else if(codec == DEMO_VP8)
+		else if(codec == DEMO_H264_SVC) {
+			const char *svc_codec = moq_loc_svc_catalog_codec(codec);
+			track->codec = g_strdup(svc_codec ? svc_codec : "avc1.534015");
+			track->temporal_id = (uint8_t)(svc_cfg.temporal_layers - 1);
+		} else if(codec == DEMO_VP8)
 			track->codec = g_strdup("vp8");
 		else if(codec == DEMO_VP9)	/* FIXME */
 			track->codec = g_strdup("vp9");
-		else if(codec == DEMO_AV1)	/* FIXME */
+		else if(codec == DEMO_VP9_SVC) {
+			const char *svc_codec = moq_loc_svc_catalog_codec(codec);
+			track->codec = g_strdup(svc_codec ? svc_codec : "vp9.svc");
+			track->temporal_id = (uint8_t)(svc_cfg.temporal_layers - 1);
+		} else if(codec == DEMO_AV1)	/* FIXME */
 			track->codec = g_strdup("av1");
 		track->width = options.width;
 		track->height = options.height;
@@ -1289,7 +1428,7 @@ int main(int argc, char *argv[]) {
 		imquic_moq_catalog_add_track(catalog, track);
 	}
 
-	if(options.video_track_name != NULL && !options.no_adaptive) {
+	if(options.video_track_name != NULL && !options.no_adaptive && !moq_loc_svc_is_svc_codec(codec)) {
 		abr = moq_loc_abr_create(options.width, options.height, options.video_framerate,
 			options.video_bitrate, options.audio_bitrate > 0 ? options.audio_bitrate : 32000);
 		applied_enc_generation = moq_loc_abr_config_generation(abr);
@@ -1298,6 +1437,10 @@ int main(int argc, char *argv[]) {
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Max quality: %dx%d@%d, %d bps video, %d bps audio\n",
 			options.width, options.height, options.video_framerate,
 			options.video_bitrate, applied_audio_bitrate);
+	} else if(moq_loc_svc_is_svc_codec(codec) && !options.no_adaptive) {
+		abr = moq_loc_abr_create(options.width, options.height, options.video_framerate,
+			options.video_bitrate, options.audio_bitrate > 0 ? options.audio_bitrate : 32000);
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive streaming enabled (temporal layer selection)\n");
 	}
 
 	if(options.publish)

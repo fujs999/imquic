@@ -13,6 +13,8 @@
 static GOptionContext *opts = NULL;
 
 gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
+	options->svc_max_temporal_layer = -1;
+	options->svc_max_spatial_layer = -1;
 	/* Supported command-line arguments */
 	GOptionEntry opt_entries[] = {
 		{ "moq-draft-version", 'M', 0, G_OPTION_ARG_STRING, &options->moq_version, "MoQ draft version number to negotiate (default=any)", "<number>|any" },
@@ -33,6 +35,8 @@ gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
 		{ "qlog-moq-messages", 'y', 0, G_OPTION_ARG_NONE, &options->qlog_moq_messages, "Whether the payload of MoQ control messages should be saved to QLOG file (default=no)", NULL },
 		{ "qlog-moq-objects", 'Y', 0, G_OPTION_ARG_NONE, &options->qlog_moq_objects, "Whether the payload of MoQ objects should be saved to QLOG file (default=no)", NULL },
 		{ "quiet", 'Z', 0, G_OPTION_ARG_NONE, &options->quiet, "If set, don't print about incoming objects on stdout (default=no)", NULL },
+		{ "svc-max-temporal-layer", 'T', 0, G_OPTION_ARG_INT, &options->svc_max_temporal_layer, "Drop relayed SVC objects above this temporal layer (-1=forward all, default=-1)", "0-3" },
+		{ "svc-max-spatial-layer", 0, 0, G_OPTION_ARG_INT, &options->svc_max_spatial_layer, "Drop relayed SVC objects above this spatial layer (-1=forward all, default=-1)", "0-2" },
 		{ "debug-level", 'd', 0, G_OPTION_ARG_INT, &options->debug_level, "Debug/logging level (0=disable debugging, 7=maximum debug level; default=4)", "1-7" },
 		{ "debug-locks", 'L', 0, G_OPTION_ARG_NONE, &options->debug_locks, "Whether to verbosely debug mutex/lock accesses (default=no)", NULL },
 		{ "debug-refcounts", 'C', 0, G_OPTION_ARG_NONE, &options->debug_refcounts, "Whether to verbosely debug reference counting (default=no)", NULL },

@@ -1648,6 +1648,10 @@ typedef struct imquic_moq_catalog_track {
 	char *role;
 	/*! \brief Render group */
 	uint8_t render_group;
+	/*! \brief Temporal layer id (SVC tracks) */
+	uint8_t temporal_id;
+	/*! \brief Spatial layer id (SVC tracks) */
+	uint8_t spatial_id;
 	/*! \brief Codec */
 	char *codec;
 	/*! \brief Sampling rate (audio tracks only) */

@@ -175,10 +175,14 @@ const char *imquic_demo_video_codec_str(imquic_demo_video_codec codec) {
 			return "h264-avcc";
 		case DEMO_H264_ANNEXB:
 			return "h264-annexb";
+		case DEMO_H264_SVC:
+			return "h264-svc";
 		case DEMO_VP8:
 			return "vp8";
 		case DEMO_VP9:
 			return "vp9";
+		case DEMO_VP9_SVC:
+			return "vp9-svc";
 		case DEMO_AV1:
 			return "av1";
 		default:
@@ -194,10 +198,14 @@ imquic_demo_video_codec imquic_demo_video_codec_from_str(const char *codec) {
 		return DEMO_H264_AVCC;
 	else if(!strcasecmp(codec, imquic_demo_video_codec_str(DEMO_H264_ANNEXB)))
 		return DEMO_H264_ANNEXB;
+	else if(!strcasecmp(codec, imquic_demo_video_codec_str(DEMO_H264_SVC)))
+		return DEMO_H264_SVC;
 	else if(!strcasecmp(codec, imquic_demo_video_codec_str(DEMO_VP8)))
 		return DEMO_VP8;
 	else if(!strcasecmp(codec, imquic_demo_video_codec_str(DEMO_VP9)))
 		return DEMO_VP9;
+	else if(!strcasecmp(codec, imquic_demo_video_codec_str(DEMO_VP9_SVC)))
+		return DEMO_VP9_SVC;
 	else if(!strcasecmp(codec, imquic_demo_video_codec_str(DEMO_AV1)))
 		return DEMO_AV1;
 	return DEMO_UNKOWN;
@@ -249,9 +257,33 @@ gboolean imquic_demo_vp8_is_keyframe(uint8_t *buffer, size_t len) {
 	return (buffer[0] & 0x01) == 0;
 }
 
+static uint32_t imquic_demo_read_bits(const uint8_t *data, size_t len, size_t *bit_offset, int count) {
+	uint32_t value = 0;
+	int i = 0;
+	for(i = 0; i < count; i++) {
+		size_t byte_idx = (*bit_offset) / 8;
+		int bit_idx = 7 - (int)((*bit_offset) % 8);
+		if(byte_idx >= len)
+			break;
+		value = (value << 1) | ((data[byte_idx] >> bit_idx) & 0x01);
+		(*bit_offset)++;
+	}
+	return value;
+}
+
 gboolean imquic_demo_vp9_is_keyframe(uint8_t *buffer, size_t len) {
-	/* TODO */
-	return FALSE;
+	size_t bit_offset = 0;
+	uint32_t frame_marker = 0, profile = 0, sync_code = 0;
+	if(!buffer || len < 3)
+		return FALSE;
+	frame_marker = imquic_demo_read_bits(buffer, len, &bit_offset, 2);
+	if(frame_marker != 0x02)
+		return FALSE;
+	profile = imquic_demo_read_bits(buffer, len, &bit_offset, 1);
+	if(profile == 3)
+		(void)imquic_demo_read_bits(buffer, len, &bit_offset, 1);
+	sync_code = imquic_demo_read_bits(buffer, len, &bit_offset, 24);
+	return sync_code == 0x498342;
 }
 
 gboolean imquic_demo_av1_is_keyframe(uint8_t *buffer, size_t len) {

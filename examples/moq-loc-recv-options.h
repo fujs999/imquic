@@ -24,6 +24,8 @@ typedef struct demo_options {
 	const char *audio_track_name;
 	const char *video_track_name;
 	const char *video_codec;
+	int svc_max_temporal_layer;
+	int svc_max_spatial_layer;
 	const char *ip;
 	int port;
 	const char *remote_host;
