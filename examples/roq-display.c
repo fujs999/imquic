@@ -692,6 +692,15 @@ int roq_display_init(const roq_display_config *config) {
 	return 0;
 }
 
+void roq_display_connection_gone(imquic_connection *conn) {
+	imquic_mutex_lock(&stats_mutex);
+	if(stats_conn == conn) {
+		imquic_connection_unref(stats_conn);
+		stats_conn = NULL;
+	}
+	imquic_mutex_unlock(&stats_mutex);
+}
+
 void roq_display_feed_rtp(imquic_connection *conn, uint64_t flow_id, uint8_t *rtp, size_t rtp_len) {
 	if(rtp == NULL || rtp_len < 12)
 		return;

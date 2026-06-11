@@ -28,6 +28,7 @@ typedef struct roq_display_config {
 } roq_display_config;
 
 int roq_display_init(const roq_display_config *config);
+void roq_display_connection_gone(imquic_connection *conn);
 void roq_display_feed_rtp(imquic_connection *conn, uint64_t flow_id, uint8_t *rtp, size_t rtp_len);
 int roq_display_handle_events(void);
 int roq_display_render(void);
