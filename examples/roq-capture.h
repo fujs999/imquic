@@ -13,6 +13,8 @@
 
 #include <glib.h>
 
+struct moq_loc_abr;
+
 typedef struct roq_capture_config {
 	gboolean capture_audio;
 	int audio_flow;
@@ -34,6 +36,7 @@ typedef struct roq_capture_config {
 typedef void (*roq_capture_rtp_cb)(uint64_t flow_id, uint8_t *rtp, size_t rtp_len, void *user_data);
 
 int roq_capture_init(const roq_capture_config *config, roq_capture_rtp_cb cb, void *user_data);
+void roq_capture_set_abr(struct moq_loc_abr *abr);
 void roq_capture_start(void);
 void roq_capture_pause(void);
 void roq_capture_destroy(void);

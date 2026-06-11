@@ -22,6 +22,7 @@
 #include <SDL2/SDL.h>
 
 #include "roq-capture.h"
+#include "moq-loc-abr.h"
 #include "roq-utils.h"
 
 #define ROQ_AUDIO_SAMPLE_RATE 48000
@@ -49,6 +50,11 @@ static struct SwsContext *sws = NULL;
 static GThread *video_capture_thread = NULL, *video_enc_thread = NULL;
 static AVFrame *latest_frame = NULL;
 static imquic_mutex frame_mutex = IMQUIC_MUTEX_INITIALIZER;
+
+static moq_loc_abr *abr = NULL;
+static int applied_enc_generation = 0, applied_audio_bitrate = 0;
+static int enc_target_width = 0, enc_target_height = 0, enc_target_fps = 0;
+static volatile int force_video_keyframe = 0;
 
 static void *roq_capture_audio_thread(void *user_data);
 static void *roq_capture_video_capture_thread(void *user_data);
@@ -96,7 +102,45 @@ static int roq_capture_open_video_encoder(int width, int height, int fps, int bi
 		videoenc_ctx = NULL;
 		return -1;
 	}
+	enc_target_width = width;
+	enc_target_height = height;
+	enc_target_fps = fps;
+	g_atomic_int_set(&force_video_keyframe, 1);
 	return 0;
+}
+
+static int roq_capture_apply_video_bitrate(int bitrate) {
+	char br[20];
+	if(videoenc_ctx == NULL || bitrate <= 0)
+		return -1;
+	videoenc_ctx->bit_rate = bitrate;
+	videoenc_ctx->rc_max_rate = bitrate + (bitrate / 10);
+	videoenc_ctx->rc_buffer_size = 2 * bitrate;
+	g_snprintf(br, sizeof(br), "%d", bitrate / 1024);
+	av_opt_set(videoenc_ctx->priv_data, "b", br, AV_OPT_SEARCH_CHILDREN);
+	return 0;
+}
+
+static void roq_capture_apply_abr_video_config(void) {
+	moq_loc_abr_config abr_cfg = { 0 };
+	int generation = 0;
+	if(abr == NULL)
+		return;
+	generation = moq_loc_abr_config_generation(abr);
+	if(generation == applied_enc_generation)
+		return;
+	moq_loc_abr_get_config(abr, &abr_cfg);
+	if(abr_cfg.width != enc_target_width || abr_cfg.height != enc_target_height || abr_cfg.fps != enc_target_fps) {
+		if(roq_capture_open_video_encoder(abr_cfg.width, abr_cfg.height, abr_cfg.fps, abr_cfg.video_bitrate) < 0)
+			return;
+	} else {
+		roq_capture_apply_video_bitrate(abr_cfg.video_bitrate);
+	}
+	applied_enc_generation = generation;
+}
+
+void roq_capture_set_abr(moq_loc_abr *controller) {
+	abr = controller;
 }
 
 static int roq_capture_create_audio(void) {
@@ -311,6 +355,14 @@ static void *roq_capture_audio_thread(void *user_data) {
 		cached += got;
 		if(cached < want)
 			continue;
+		if(abr != NULL) {
+			moq_loc_abr_config abr_cfg = { 0 };
+			moq_loc_abr_get_config(abr, &abr_cfg);
+			if(abr_cfg.audio_bitrate != applied_audio_bitrate) {
+				if(opus_encoder_ctl(audioenc, OPUS_SET_BITRATE(abr_cfg.audio_bitrate)) == OPUS_OK)
+					applied_audio_bitrate = abr_cfg.audio_bitrate;
+			}
+		}
 		int length = opus_encode(audioenc, (opus_int16 *)pcm, ROQ_AUDIO_FRAME_SAMPLES, rtp + 12, sizeof(rtp) - 12);
 		cached = 0;
 		if(length < 0) {
@@ -330,13 +382,26 @@ static void *roq_capture_video_capture_thread(void *user_data) {
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "Starting video capture thread\n");
 	AVPacket packet = { 0 };
 	AVFrame *video_frame = av_frame_alloc();
-	int last_width = 0, last_height = 0;
+	int scale_width = 0, scale_height = 0, last_scale_width = 0, last_scale_height = 0;
 
 	while(!g_atomic_int_get(&capture_stop)) {
 		if(!g_atomic_int_get(&capture_started)) {
 			g_usleep(100000);
 			continue;
 		}
+		if(abr != NULL) {
+			moq_loc_abr_config abr_cfg = { 0 };
+			moq_loc_abr_get_config(abr, &abr_cfg);
+			scale_width = abr_cfg.width;
+			scale_height = abr_cfg.height;
+		} else {
+			scale_width = cfg.width;
+			scale_height = cfg.height;
+		}
+		if(scale_width <= 0)
+			scale_width = cfg.width;
+		if(scale_height <= 0)
+			scale_height = cfg.height;
 		memset(&packet, 0, sizeof(packet));
 		int ret = av_read_frame(webcam_fmt, &packet);
 		if(ret < 0) {
@@ -361,17 +426,17 @@ static void *roq_capture_video_capture_thread(void *user_data) {
 					ret, av_err2str(ret));
 				break;
 			}
-			if(sws == NULL || cfg.width != last_width || cfg.height != last_height) {
+			if(sws == NULL || scale_width != last_scale_width || scale_height != last_scale_height) {
 				if(sws != NULL)
 					sws_freeContext(sws);
 				sws = sws_getContext(video_frame->width, video_frame->height, video_frame->format,
-					cfg.width, cfg.height, AV_PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);
-				last_width = cfg.width;
-				last_height = cfg.height;
+					scale_width, scale_height, AV_PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);
+				last_scale_width = scale_width;
+				last_scale_height = scale_height;
 			}
 			AVFrame *scaled_frame = av_frame_alloc();
-			scaled_frame->width = cfg.width;
-			scaled_frame->height = cfg.height;
+			scaled_frame->width = scale_width;
+			scaled_frame->height = scale_height;
 			scaled_frame->format = AV_PIX_FMT_YUV420P;
 			ret = av_image_alloc(scaled_frame->data, scaled_frame->linesize,
 				scaled_frame->width, scaled_frame->height, AV_PIX_FMT_YUV420P, 1);
@@ -400,14 +465,24 @@ static void *roq_capture_video_enc_thread(void *user_data) {
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "Starting video encoding thread\n");
 	AVPacket packet = { 0 };
 	int64_t now = 0, before = 0;
-	int fps = cfg.video_framerate > 0 ? cfg.video_framerate : 25;
-	int64_t wait = G_USEC_PER_SEC / fps;
+	int target_fps = cfg.video_framerate > 0 ? cfg.video_framerate : 25;
+	int64_t wait = G_USEC_PER_SEC / target_fps;
 
 	while(!g_atomic_int_get(&capture_stop)) {
 		if(!g_atomic_int_get(&capture_started)) {
 			g_usleep(100000);
 			continue;
 		}
+		if(abr != NULL) {
+			moq_loc_abr_config abr_cfg = { 0 };
+			roq_capture_apply_abr_video_config();
+			moq_loc_abr_get_config(abr, &abr_cfg);
+			if(abr_cfg.fps > 0)
+				target_fps = abr_cfg.fps;
+		}
+		if(target_fps <= 0)
+			target_fps = 1;
+		wait = G_USEC_PER_SEC / target_fps;
 		now = g_get_monotonic_time();
 		if(before == 0)
 			before = now - wait;
@@ -422,7 +497,12 @@ static void *roq_capture_video_enc_thread(void *user_data) {
 			imquic_mutex_unlock(&frame_mutex);
 			continue;
 		}
-		latest_frame->pict_type = AV_PICTURE_TYPE_NONE;
+		if(g_atomic_int_get(&force_video_keyframe)) {
+			latest_frame->pict_type = AV_PICTURE_TYPE_I;
+			g_atomic_int_set(&force_video_keyframe, 0);
+		} else {
+			latest_frame->pict_type = AV_PICTURE_TYPE_NONE;
+		}
 		int ret = avcodec_send_frame(videoenc_ctx, latest_frame);
 		imquic_mutex_unlock(&frame_mutex);
 		if(ret < 0) {
@@ -437,7 +517,7 @@ static void *roq_capture_video_enc_thread(void *user_data) {
 			IMQUIC_LOG(IMQUIC_LOG_ERR, "Error encoding video frame: %d (%s)\n", ret, av_err2str(ret));
 			continue;
 		}
-		imquic_roq_rtp_packetize_h264_annexb(&video_rtp, packet.data, (size_t)packet.size, fps,
+		imquic_roq_rtp_packetize_h264_annexb(&video_rtp, packet.data, (size_t)packet.size, target_fps,
 			roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
 		av_packet_unref(&packet);
 	}

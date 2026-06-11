@@ -50,6 +50,7 @@ typedef struct demo_options {
 	gboolean qlog_sequential;
 	gboolean qlog_roq_packets;
 	gboolean quiet;
+	gboolean no_adaptive;
 	gboolean debug_ffmpeg;
 	int debug_level;
 	gboolean debug_locks;

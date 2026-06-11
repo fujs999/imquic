@@ -89,6 +89,10 @@ static void imquic_demo_new_connection(imquic_connection *conn, void *user_data)
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s]   -- %s (%s)\n", imquic_get_connection_name(conn),
 		imquic_is_connection_webtransport(conn) ? "WebTransport" : "Raw QUIC",
 		imquic_is_connection_webtransport(conn) ? imquic_get_connection_wt_protocol(conn) : imquic_get_connection_alpn(conn));
+#ifdef HAVE_ROQ_DISPLAY
+	if(options.display)
+		imquic_enable_connection_loss_feedback(conn);
+#endif
 }
 
 static void imquic_demo_rtp_incoming(imquic_connection *conn, imquic_roq_multiplexing multiplexing,
@@ -118,7 +122,7 @@ static void imquic_demo_rtp_incoming(imquic_connection *conn, imquic_roq_multipl
 	}
 #ifdef HAVE_ROQ_DISPLAY
 	if(options.display)
-		roq_display_feed_rtp(flow_id, bytes, blen);
+		roq_display_feed_rtp(conn, flow_id, bytes, blen);
 #endif
 }
 

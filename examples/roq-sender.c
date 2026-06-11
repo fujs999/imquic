@@ -20,6 +20,7 @@
 #include "roq-utils.h"
 #ifdef HAVE_ROQ_CAPTURE
 #include "roq-capture.h"
+#include "moq-loc-abr.h"
 #endif
 
 /* Command line options */
@@ -47,6 +48,14 @@ static void imquic_demo_handle_signal(int signum) {
 /* Handled connections */
 static GHashTable *connections = NULL;
 static imquic_mutex mutex = IMQUIC_MUTEX_INITIALIZER;
+#ifdef HAVE_ROQ_CAPTURE
+static imquic_mutex send_mutex = IMQUIC_MUTEX_INITIALIZER;
+static moq_loc_abr *abr = NULL;
+static GThread *abr_thread = NULL;
+static uint64_t send_ok_count = 0, send_fail_count = 0, video_bytes_sent = 0;
+static int applied_audio_bitrate = 0;
+static void *imquic_demo_abr_thread(void *user_data);
+#endif
 
 /* RoQ multiplexing (set during init) */
 static imquic_roq_multiplexing multiplexing;
@@ -61,11 +70,23 @@ static void imquic_demo_send_rtp_to_connections(uint64_t flow_id, uint8_t *buffe
 	GHashTableIter iter;
 	gpointer value;
 	size_t sent = 0;
+	gboolean video = (options.video_flow >= 0 && flow_id == (uint64_t)options.video_flow);
 	imquic_mutex_lock(&mutex);
 	g_hash_table_iter_init(&iter, connections);
 	while(g_hash_table_iter_next(&iter, NULL, &value)) {
 		imquic_connection *roq_conn = (imquic_connection *)value;
 		sent = imquic_roq_send_rtp(roq_conn, multiplexing, flow_id, buffer, bytes, one_stream_per_packet);
+#ifdef HAVE_ROQ_CAPTURE
+		imquic_mutex_lock(&send_mutex);
+		if(sent > 0) {
+			send_ok_count++;
+			if(video)
+				video_bytes_sent += bytes;
+		} else {
+			send_fail_count++;
+		}
+		imquic_mutex_unlock(&send_mutex);
+#endif
 		if(sent == 0) {
 			IMQUIC_LOG(IMQUIC_LOG_WARN, "[%s] Couldn't send RTP packet...\n",
 				imquic_get_connection_name(roq_conn));
@@ -86,6 +107,39 @@ static void imquic_demo_capture_rtp(uint64_t flow_id, uint8_t *rtp, size_t rtp_l
 		return;
 	imquic_demo_send_rtp_to_connections(flow_id, rtp, rtp_len);
 }
+
+static imquic_connection *imquic_demo_get_abr_connection(void) {
+	imquic_connection *conn = NULL;
+	GHashTableIter iter;
+	gpointer value;
+	imquic_mutex_lock(&mutex);
+	g_hash_table_iter_init(&iter, connections);
+	if(g_hash_table_iter_next(&iter, NULL, &value))
+		conn = (imquic_connection *)value;
+	imquic_mutex_unlock(&mutex);
+	return conn;
+}
+
+static void *imquic_demo_abr_thread(void *user_data) {
+	IMQUIC_LOG(IMQUIC_LOG_INFO, "Starting ABR control thread\n");
+	while(!g_atomic_int_get(&stop)) {
+		if(abr != NULL && g_atomic_int_get(&capture_active)) {
+			imquic_connection *conn = imquic_demo_get_abr_connection();
+			if(conn != NULL) {
+				uint64_t ok = 0, fail = 0, bytes = 0;
+				imquic_mutex_lock(&send_mutex);
+				ok = send_ok_count;
+				fail = send_fail_count;
+				bytes = video_bytes_sent;
+				imquic_mutex_unlock(&send_mutex);
+				moq_loc_abr_update(abr, conn, ok, fail, bytes);
+			}
+		}
+		g_usleep(500000);
+	}
+	IMQUIC_LOG(IMQUIC_LOG_INFO, "Leaving ABR control thread\n");
+	return NULL;
+}
 #endif
 
 /* Callbacks */
@@ -100,6 +154,8 @@ static void imquic_demo_new_connection(imquic_connection *conn, void *user_data)
 		imquic_is_connection_webtransport(conn) ? "WebTransport" : "Raw QUIC",
 		imquic_is_connection_webtransport(conn) ? imquic_get_connection_wt_protocol(conn) : imquic_get_connection_alpn(conn));
 #ifdef HAVE_ROQ_CAPTURE
+	if(!options.no_adaptive)
+		imquic_enable_connection_loss_feedback(conn);
 	if(options.capture && !g_atomic_int_get(&capture_active)) {
 		g_atomic_int_set(&capture_active, 1);
 		roq_capture_start();
@@ -257,6 +313,15 @@ int main(int argc, char *argv[]) {
 				options.video_bitrate, options.video_pt);
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Video device '%s' (%s)\n", options.video_device, options.video_format);
 		}
+		if(capture_video && !options.no_adaptive) {
+			abr = moq_loc_abr_create(options.width, options.height, options.video_framerate,
+				options.video_bitrate, options.audio_bitrate);
+			applied_audio_bitrate = options.audio_bitrate;
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "Adaptive streaming enabled (targets: RTT<=150ms, jitter<=50ms, loss<=50%%)\n");
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Max quality: %dx%d@%d, %d bps video, %d bps audio\n",
+				options.width, options.height, options.video_framerate,
+				options.video_bitrate, applied_audio_bitrate);
+		}
 	} else
 #endif
 	{
@@ -392,6 +457,18 @@ int main(int argc, char *argv[]) {
 		if(roq_capture_init(&capture_cfg, imquic_demo_capture_rtp, NULL) < 0) {
 			ret = 1;
 			goto done;
+		}
+		if(abr != NULL)
+			roq_capture_set_abr(abr);
+		if(abr != NULL) {
+			GError *error = NULL;
+			abr_thread = g_thread_try_new("roq-abr", &imquic_demo_abr_thread, NULL, &error);
+			if(error != NULL) {
+				IMQUIC_LOG(IMQUIC_LOG_FATAL, "Got error %d (%s) trying to start ABR thread\n",
+					error->code, error->message ? error->message : "??");
+				ret = 1;
+				goto done;
+			}
 		}
 	}
 #endif
@@ -557,6 +634,12 @@ int main(int argc, char *argv[]) {
 
 done:
 #ifdef HAVE_ROQ_CAPTURE
+	if(abr_thread != NULL)
+		g_thread_join(abr_thread);
+	abr_thread = NULL;
+	if(abr != NULL)
+		moq_loc_abr_destroy(abr);
+	abr = NULL;
 	if(options.capture)
 		roq_capture_destroy();
 #endif

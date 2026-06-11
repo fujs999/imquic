@@ -196,7 +196,9 @@ if ENABLE_ROQ_CAPTURE
 
 imquic_roq_sender_SOURCES += \
 	roq-capture.c \
-	roq-capture.h
+	roq-capture.h \
+	moq-loc-abr.c \
+	moq-loc-abr.h
 imquic_roq_sender_CFLAGS += \
 	$(ROQAV_CFLAGS) \
 	-DHAVE_ROQ_CAPTURE
