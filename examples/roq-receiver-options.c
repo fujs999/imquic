@@ -34,6 +34,17 @@ gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
 		{ "qlog-rtp-packets", 'y', 0, G_OPTION_ARG_NONE, &options->qlog_roq_packets, "Whether the payload of RoQ RTP packets should be saved to QLOG file (default=no)", NULL },
 		{ "quiet", 'Z', 0, G_OPTION_ARG_NONE, &options->quiet, "If set, don't print about incoming/outgoing packets on stdout (default=no)", NULL },
 		{ "echo", 'e', 0, G_OPTION_ARG_NONE, &options->echo, "If set, the receiver will echo incoming RTP packets back to the sender (default=no)", NULL },
+#ifdef HAVE_ROQ_DISPLAY
+		{ "display", 'g', 0, G_OPTION_ARG_NONE, &options->display, "Decode and play incoming audio/video (default=no)", NULL },
+		{ "no-audio", 'N', 0, G_OPTION_ARG_NONE, &options->no_audio, "When displaying, disable audio playback (default=no)", NULL },
+		{ "audio-flow", 'A', 0, G_OPTION_ARG_INT64, &options->audio_flow, "When displaying, flow ID of the audio RTP stream (default=0)", "number" },
+		{ "audio-pt", 'P', 0, G_OPTION_ARG_INT, &options->audio_pt, "When displaying, RTP payload type for Opus audio (default=111)", "pt" },
+		{ "video-flow", 'V', 0, G_OPTION_ARG_INT64, &options->video_flow, "When displaying, flow ID of the video RTP stream (default=1)", "number" },
+		{ "video-pt", 'T', 0, G_OPTION_ARG_INT, &options->video_pt, "When displaying, RTP payload type for H.264 video (default=96)", "pt" },
+		{ "window-width", 'X', 0, G_OPTION_ARG_INT, &options->window_width, "When displaying, window width in pixels (default=1280)", "pixels" },
+		{ "window-height", 'Y', 0, G_OPTION_ARG_INT, &options->window_height, "When displaying, window height in pixels (default=720)", "pixels" },
+		{ "debug-ffmpeg", 'D', 0, G_OPTION_ARG_NONE, &options->debug_ffmpeg, "When displaying, verbosely debug FFmpeg (default=no)", NULL },
+#endif
 		{ "debug-level", 'd', 0, G_OPTION_ARG_INT, &options->debug_level, "Debug/logging level (0=disable debugging, 7=maximum debug level; default=4)", "1-7" },
 		{ "debug-locks", 'L', 0, G_OPTION_ARG_NONE, &options->debug_locks, "Whether to verbosely debug mutex/lock accesses (default=no)", NULL },
 		{ "debug-refcounts", 'C', 0, G_OPTION_ARG_NONE, &options->debug_refcounts, "Whether to verbosely debug reference counting (default=no)", NULL },

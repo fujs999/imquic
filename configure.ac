@@ -164,7 +164,7 @@ AC_ARG_ENABLE([roq-examples],
                                   sdl2
                                  ],
                                  [enable_roq_capture=yes],
-                                 [AC_MSG_WARN([Some dependencies not met, RoQ capture support will not be built])])
+                                 [AC_MSG_WARN([Some dependencies not met, RoQ A/V support will not be built])])
               ],
               [enable_roq_examples=no])
 AM_CONDITIONAL([ENABLE_ROQ_EXAMPLES], [test "x$enable_roq_examples" = "xyes"])

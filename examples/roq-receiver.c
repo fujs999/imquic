@@ -14,6 +14,9 @@
 #include <imquic/roq.h>
 
 #include "roq-receiver-options.h"
+#ifdef HAVE_ROQ_DISPLAY
+#include "roq-display.h"
+#endif
 
 /* Command line options */
 static demo_options options = { 0 };
@@ -113,6 +116,10 @@ static void imquic_demo_rtp_incoming(imquic_connection *conn, imquic_roq_multipl
 				imquic_get_connection_name(conn), imquic_roq_multiplexing_str(multiplexing), flow_id, sent);
 		}
 	}
+#ifdef HAVE_ROQ_DISPLAY
+	if(options.display)
+		roq_display_feed_rtp(flow_id, bytes, blen);
+#endif
 }
 
 static void imquic_demo_connection_failed(void *user_data) {
@@ -146,6 +153,14 @@ int main(int argc, char *argv[]) {
 
 	/* Initialize some command line options defaults */
 	options.debug_level = IMQUIC_LOG_INFO;
+#ifdef HAVE_ROQ_DISPLAY
+	options.audio_flow = 0;
+	options.audio_pt = 111;
+	options.video_flow = 1;
+	options.video_pt = 96;
+	options.window_width = 1280;
+	options.window_height = 720;
+#endif
 	/* Let's call our cmdline parser */
 	if(!demo_options_parse(&options, argc, argv)) {
 		demo_options_show_usage();
@@ -215,6 +230,30 @@ int main(int argc, char *argv[]) {
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "Quiet mode (won't print RTP packets)\n");
 	if(options.echo)
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "Echo mode (will send incoming RTP packets back to the client)\n");
+#ifdef HAVE_ROQ_DISPLAY
+	if(options.display) {
+		if(options.audio_pt < 0 || options.audio_pt > 127 || options.video_pt < 0 || options.video_pt > 127) {
+			IMQUIC_LOG(IMQUIC_LOG_FATAL, "Invalid audio/video payload type\n");
+			ret = 1;
+			goto done;
+		}
+		roq_display_config display_cfg = {
+			.play_video = TRUE,
+			.video_flow = options.video_flow,
+			.video_pt = (uint8_t)options.video_pt,
+			.play_audio = !options.no_audio,
+			.audio_flow = options.audio_flow,
+			.audio_pt = (uint8_t)options.audio_pt,
+			.window_width = options.window_width,
+			.window_height = options.window_height,
+			.debug_ffmpeg = options.debug_ffmpeg
+		};
+		if(roq_display_init(&display_cfg) < 0) {
+			ret = 1;
+			goto done;
+		}
+	}
+#endif
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "\n");
 
 	/* Initialize the library and create a client or server endpoint */
@@ -294,12 +333,25 @@ int main(int argc, char *argv[]) {
 	connections = g_hash_table_new(NULL, NULL);
 	imquic_start_endpoint(endpoint);
 
-	while(!stop)
+	while(!stop) {
+#ifdef HAVE_ROQ_DISPLAY
+		if(options.display) {
+			if(roq_display_handle_events() < 0)
+				g_atomic_int_set(&stop, 1);
+			roq_display_render();
+			continue;
+		}
+#endif
 		g_usleep(100000);
+	}
 
 	imquic_shutdown_endpoint(endpoint);
 
 done:
+#ifdef HAVE_ROQ_DISPLAY
+	if(options.display)
+		roq_display_destroy();
+#endif
 	imquic_deinit();
 	if(connections != NULL)
 		g_hash_table_unref(connections);

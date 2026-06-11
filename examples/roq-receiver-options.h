@@ -34,6 +34,17 @@ typedef struct demo_options {
 	gboolean qlog_roq_packets;
 	gboolean quiet;
 	gboolean echo;
+#ifdef HAVE_ROQ_DISPLAY
+	gboolean display;
+	gboolean no_audio;
+	int64_t audio_flow;
+	int audio_pt;
+	int64_t video_flow;
+	int video_pt;
+	int window_width;
+	int window_height;
+	gboolean debug_ffmpeg;
+#endif
 	int debug_level;
 	gboolean debug_locks;
 	gboolean debug_refcounts;

@@ -45,7 +45,7 @@ In both cases, the client will then send a single `ciao` buffer on a bidirection
 To build the RTP Over QUIC (RoQ) examples, pass `--enable-roq-examples` to the `./configure` script. This will build two command line applications, namely:
 
 * `imquic-roq-sender`, a basic RoQ sender, that will listen for RTP packets on some UDP ports, and restream them via QUIC.
-* `imquic-roq-receiver`, a basic RoQ receiver, that can print the flow ID and RTP headers of the incoming packets, and/or echo packets back;
+* `imquic-roq-receiver`, a basic RoQ receiver, that can print the flow ID and RTP headers of the incoming packets, echo packets back, and/or decode and play incoming Opus audio and H.264 video;
 
 Both demos can act as either a server or a client, and provide a few configuration options: pass `-h` or `--help` for more information.
 
@@ -56,6 +56,10 @@ This launches the RoQ receiver as a server (`-o` is omitted, so the default beha
 Since no other parameter is provided, the default behaviour is just to print some detail about incoming packets. To not show such information, the `-Z` or `--quiet` flag can be passed. The RoQ receiver can also be configured to echo packets back to the client via `-e` or `--echo`. This launches the same RoQ server as before, but in quiet (`-Z`) and echo (`-e`) mode and on WebTransport too (`-w`):
 
 	./examples/imquic-roq-receiver -w -q -p 9000 -Z -e -c ../localhost.crt -k ../localhost.key
+
+This launches the same RoQ server as before, but with audio/video playback enabled (`-g`), playing Opus audio from flow ID `0` (`-A 0`) and showing H.264 video from flow ID `1` (`-V 1`):
+
+	./examples/imquic-roq-receiver -q -p 9000 -g -A 0 -V 1 -Z -c ../localhost.crt -k ../localhost.key
 
 This instead launches the RoQ sender as a client (`-o`) to connect to that server (whether in echo mode or not), waiting for audio RTP packets on port `15002` (whose flow ID on RoQ will be `0`) and for video RTP packets on port `15004` (whose flow ID on RoQ will be `1`), and using a separate `STREAM` for each RTP packet:
 

@@ -203,6 +203,17 @@ imquic_roq_sender_CFLAGS += \
 imquic_roq_sender_LDADD += \
 	$(ROQAV_LIBS)
 
+imquic_roq_receiver_SOURCES += \
+	roq-display.c \
+	roq-display.h \
+	roq-utils.c \
+	roq-utils.h
+imquic_roq_receiver_CFLAGS += \
+	$(ROQAV_CFLAGS) \
+	-DHAVE_ROQ_DISPLAY
+imquic_roq_receiver_LDADD += \
+	$(ROQAV_LIBS)
+
 endif
 
 endif
