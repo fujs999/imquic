@@ -106,8 +106,9 @@ static gboolean moq_loc_svc_parse_h264_nal(const uint8_t *nal, size_t nal_len, m
 }
 
 static gboolean moq_loc_svc_parse_vp9(const uint8_t *data, size_t len, moq_loc_svc_layer *layer) {
-	size_t bit_offset = 0, saved = 0;
-	uint32_t frame_marker = 0, profile = 0, sync_code = 0;
+	size_t bit_offset = 0;
+	uint32_t frame_marker = 0, profile = 0, show_existing = 0, frame_type = 0;
+	uint32_t sync_code = 0, error_resilient = 0;
 	if(data == NULL || len < 3 || layer == NULL)
 		return FALSE;
 	layer->spatial_id = 0;
@@ -117,19 +118,26 @@ static gboolean moq_loc_svc_parse_vp9(const uint8_t *data, size_t len, moq_loc_s
 	if(frame_marker != 0x02)
 		return FALSE;
 	profile = moq_loc_svc_read_bits(data, len, &bit_offset, 1);
-	if(profile == 3)
-		(void)moq_loc_svc_read_bits(data, len, &bit_offset, 1);
-	saved = bit_offset;
-	sync_code = moq_loc_svc_read_bits(data, len, &bit_offset, 24);
-	if(sync_code == 0x498342) {
+	if(profile)
+		profile = (moq_loc_svc_read_bits(data, len, &bit_offset, 1) << 1) | 1;
+	show_existing = moq_loc_svc_read_bits(data, len, &bit_offset, 1);
+	if(show_existing)
+		return FALSE;
+	frame_type = moq_loc_svc_read_bits(data, len, &bit_offset, 1);
+	if(frame_type == 0) {
+		(void)moq_loc_svc_read_bits(data, len, &bit_offset, 1);	/* show_frame */
+		(void)moq_loc_svc_read_bits(data, len, &bit_offset, 1);	/* error_resilient_mode */
+		sync_code = moq_loc_svc_read_bits(data, len, &bit_offset, 24);
+		if(sync_code != 0x498342)
+			return FALSE;
 		layer->is_keyframe = TRUE;
 		layer->temporal_id = 0;
 		return TRUE;
 	}
-	bit_offset = saved;
 	(void)moq_loc_svc_read_bits(data, len, &bit_offset, 1);	/* show_frame */
-	(void)moq_loc_svc_read_bits(data, len, &bit_offset, 1);	/* error_resilient */
-	(void)moq_loc_svc_read_bits(data, len, &bit_offset, 1);	/* intra_only */
+	error_resilient = moq_loc_svc_read_bits(data, len, &bit_offset, 1);
+	if(!error_resilient)
+		(void)moq_loc_svc_read_bits(data, len, &bit_offset, 1);	/* intra_only */
 	(void)moq_loc_svc_read_bits(data, len, &bit_offset, 2);	/* reset_frame_context */
 	(void)moq_loc_svc_read_bits(data, len, &bit_offset, 1);	/* allow_high_precision_mv */
 	(void)moq_loc_svc_read_bits(data, len, &bit_offset, 1);	/* mcomp_filter_type */

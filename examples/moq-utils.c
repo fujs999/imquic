@@ -271,17 +271,32 @@ static uint32_t imquic_demo_read_bits(const uint8_t *data, size_t len, size_t *b
 	return value;
 }
 
+gboolean imquic_demo_vp9_rtp_is_keyframe(const uint8_t *payload, size_t payload_len) {
+	if(payload == NULL || payload_len == 0)
+		return FALSE;
+	/* RFC 9627: P=1 means inter-picture predicted (delta frame) */
+	return (payload[0] & 0x40) == 0;
+}
+
 gboolean imquic_demo_vp9_is_keyframe(uint8_t *buffer, size_t len) {
 	size_t bit_offset = 0;
-	uint32_t frame_marker = 0, profile = 0, sync_code = 0;
+	uint32_t frame_marker = 0, profile = 0, show_existing = 0, frame_type = 0, sync_code = 0;
 	if(!buffer || len < 3)
 		return FALSE;
 	frame_marker = imquic_demo_read_bits(buffer, len, &bit_offset, 2);
 	if(frame_marker != 0x02)
 		return FALSE;
 	profile = imquic_demo_read_bits(buffer, len, &bit_offset, 1);
-	if(profile == 3)
-		(void)imquic_demo_read_bits(buffer, len, &bit_offset, 1);
+	if(profile)
+		profile = (imquic_demo_read_bits(buffer, len, &bit_offset, 1) << 1) | 1;
+	show_existing = imquic_demo_read_bits(buffer, len, &bit_offset, 1);
+	if(show_existing)
+		return FALSE;
+	frame_type = imquic_demo_read_bits(buffer, len, &bit_offset, 1);
+	if(frame_type != 0)
+		return FALSE;
+	(void)imquic_demo_read_bits(buffer, len, &bit_offset, 1);	/* show_frame */
+	(void)imquic_demo_read_bits(buffer, len, &bit_offset, 1);	/* error_resilient_mode */
 	sync_code = imquic_demo_read_bits(buffer, len, &bit_offset, 24);
 	return sync_code == 0x498342;
 }

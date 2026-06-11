@@ -229,7 +229,7 @@ void imquic_roq_vp9_depay_reset(imquic_roq_vp9_depay *depay) {
 
 gboolean imquic_roq_rtp_depay_vp9(imquic_roq_vp9_depay *depay,
 		const uint8_t *payload, size_t payload_len, uint16_t seq, uint32_t timestamp,
-		uint8_t **frame, size_t *frame_len) {
+		gboolean rtp_marker, uint8_t **frame, size_t *frame_len) {
 	size_t hdr_len = 0, data_len = 0;
 	gboolean start = FALSE, end = FALSE;
 	if(depay == NULL || payload == NULL || payload_len == 0 || frame == NULL || frame_len == NULL)
@@ -243,6 +243,8 @@ gboolean imquic_roq_rtp_depay_vp9(imquic_roq_vp9_depay *depay,
 		return FALSE;
 	start = (payload[0] & 0x08) != 0;
 	end = (payload[0] & 0x04) != 0;
+	if(!end && rtp_marker && depay->in_frame)
+		end = TRUE;
 	if(depay->last_ts != timestamp) {
 		imquic_roq_vp9_depay_reset(depay);
 		depay->last_ts = timestamp;
@@ -250,7 +252,7 @@ gboolean imquic_roq_rtp_depay_vp9(imquic_roq_vp9_depay *depay,
 		imquic_roq_vp9_depay_reset(depay);
 	}
 	depay->last_seq = seq;
-	if(start)
+	if(start || (end && depay->frame->len == 0))
 		imquic_roq_vp9_depay_reset(depay);
 	data_len = payload_len - hdr_len;
 	g_byte_array_append(depay->frame, payload + hdr_len, (guint)data_len);

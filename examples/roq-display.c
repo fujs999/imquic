@@ -654,24 +654,26 @@ static int roq_display_decode_access_unit(uint8_t *buffer, size_t length, gboole
 		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error decoding video frame: %d (%s)\n", ret, av_err2str(ret));
 		return -1;
 	}
-	AVFrame *decoded_frame = av_frame_alloc();
-	ret = avcodec_receive_frame(videodec_ctx, decoded_frame);
-	if(ret == AVERROR(EAGAIN)) {
-		av_frame_free(&decoded_frame);
-		return 0;
+	while(TRUE) {
+		AVFrame *decoded_frame = av_frame_alloc();
+		ret = avcodec_receive_frame(videodec_ctx, decoded_frame);
+		if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+			av_frame_free(&decoded_frame);
+			break;
+		}
+		if(ret < 0) {
+			IMQUIC_LOG(IMQUIC_LOG_ERR, "Error decoding video frame: %d (%s)\n", ret, av_err2str(ret));
+			av_frame_free(&decoded_frame);
+			return -1;
+		}
+		imquic_mutex_lock(&frame_mutex);
+		if(latest_frame != NULL)
+			av_frame_free(&latest_frame);
+		latest_frame = decoded_frame;
+		video_bytes_window += length;
+		video_frames_window++;
+		imquic_mutex_unlock(&frame_mutex);
 	}
-	if(ret < 0) {
-		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error decoding video frame: %d (%s)\n", ret, av_err2str(ret));
-		av_frame_free(&decoded_frame);
-		return -1;
-	}
-	imquic_mutex_lock(&frame_mutex);
-	if(latest_frame != NULL)
-		av_frame_free(&latest_frame);
-	latest_frame = decoded_frame;
-	video_bytes_window += length;
-	video_frames_window++;
-	imquic_mutex_unlock(&frame_mutex);
 	return 0;
 }
 
@@ -687,7 +689,8 @@ static void roq_display_feed_vp9(uint64_t flow_id, imquic_roq_rtp_header *header
 		return;
 	const uint8_t *payload = rtp + payload_offset;
 	if(!imquic_roq_rtp_depay_vp9(&vp9_depay, payload, payload_len,
-			ntohs(header->seq_number), ntohl(header->timestamp), &frame, &frame_len))
+			ntohs(header->seq_number), ntohl(header->timestamp),
+			header->markerbit != 0, &frame, &frame_len))
 		return;
 	if(frame == NULL || frame_len == 0)
 		return;
@@ -696,7 +699,8 @@ static void roq_display_feed_vp9(uint64_t flow_id, imquic_roq_rtp_header *header
 		imquic_roq_vp9_depay_reset(&vp9_depay);
 		return;
 	}
-	keyframe = imquic_demo_vp9_is_keyframe(frame, frame_len);
+	keyframe = imquic_demo_vp9_is_keyframe(frame, frame_len) ||
+		imquic_demo_vp9_rtp_is_keyframe(payload, payload_len);
 	roq_display_decode_access_unit(frame, frame_len, keyframe);
 	imquic_roq_vp9_depay_reset(&vp9_depay);
 }

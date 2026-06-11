@@ -179,7 +179,10 @@ static int imquic_demo_create_video_decoder(uint8_t *extradata, size_t extradata
 	videodec_ctx = avcodec_alloc_context3(video_codec);
 	videodec_ctx->coded_width = 640;	/* Just a placeholder */
 	videodec_ctx->coded_height = 480;	/* Just a placeholder */
-	if(extradata != NULL && extradata_size > 0) {
+	if(codec == DEMO_VP9 || codec == DEMO_VP9_SVC)
+		videodec_ctx->thread_count = 2;
+	if(extradata != NULL && extradata_size > 0 &&
+			codec != DEMO_VP9 && codec != DEMO_VP9_SVC && codec != DEMO_VP8) {
 		videodec_ctx->extradata = av_malloc(extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
 		memcpy(videodec_ctx->extradata, extradata, extradata_size);
 		memset(videodec_ctx->extradata + extradata_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
@@ -195,6 +198,26 @@ static int imquic_demo_create_video_decoder(uint8_t *extradata, size_t extradata
 	if(codec == DEMO_AV1)
 		got_keyframe = TRUE;
 	return 0;
+}
+
+static gboolean imquic_demo_object_is_keyframe(imquic_moq_object *object,
+		struct imquic_moq_property_data *loc_extradata) {
+	if(object == NULL)
+		return FALSE;
+	if(loc_extradata != NULL)
+		return TRUE;
+	/* imquic-moq-loc-send starts a new group on each keyframe with object_id=0 */
+	if(object->object_id == 0)
+		return TRUE;
+	if(codec == DEMO_H264_ANNEXB || codec == DEMO_H264_SVC)
+		return imquic_demo_h264_is_keyframe(object->payload, object->payload_len);
+	if(codec == DEMO_VP8)
+		return imquic_demo_vp8_is_keyframe(object->payload, object->payload_len);
+	if(codec == DEMO_VP9 || codec == DEMO_VP9_SVC)
+		return imquic_demo_vp9_is_keyframe(object->payload, object->payload_len);
+	if(codec == DEMO_AV1)
+		return imquic_demo_av1_is_keyframe(object->payload, object->payload_len);
+	return FALSE;
 }
 
 static int imquic_demo_decode_audio(uint8_t *buffer, size_t length) {
@@ -265,34 +288,33 @@ static int imquic_demo_decode_video(uint8_t *buffer, size_t length, gboolean key
 		av_packet_unref(&avpacket);
 		return -1;
 	}
-	AVFrame *decoded_frame = av_frame_alloc();
-	ret = avcodec_receive_frame(videodec_ctx, decoded_frame);
-	if(ret == AVERROR(EAGAIN)) {
-		/* Encoder needs more input? */
-		IMQUIC_LOG(IMQUIC_LOG_VERB, "  -- Skipping decoding of video frame: %d (%s)\n",
-			ret, av_err2str(ret));
-		av_frame_free(&decoded_frame);
-		return 0;
-	} else if(ret < 0) {
-		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error decoding video frame: %d (%s)\n",
-			ret, av_err2str(ret));
-		av_frame_free(&decoded_frame);
-		av_packet_unref(&avpacket);
-		return -1;
+	while(TRUE) {
+		AVFrame *decoded_frame = av_frame_alloc();
+		ret = avcodec_receive_frame(videodec_ctx, decoded_frame);
+		if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+			av_frame_free(&decoded_frame);
+			break;
+		}
+		if(ret < 0) {
+			IMQUIC_LOG(IMQUIC_LOG_ERR, "Error decoding video frame: %d (%s)\n",
+				ret, av_err2str(ret));
+			av_frame_free(&decoded_frame);
+			av_packet_unref(&avpacket);
+			return -1;
+		}
+		if(!render) {
+			av_frame_free(&decoded_frame);
+			continue;
+		}
+		/* Update the latest frame, we'll render in the main thread */
+		imquic_mutex_lock(&mutex);
+		if(latest_frame != NULL)
+			av_frame_free(&latest_frame);
+		latest_frame = decoded_frame;
+		video_bytes_window += length;
+		video_frames_window++;
+		imquic_mutex_unlock(&mutex);
 	}
-	if(!render) {
-		av_frame_free(&decoded_frame);
-		av_packet_unref(&avpacket);
-		return 0;
-	}
-	/* Update the latest frame, we'll render in the main thread */
-	imquic_mutex_lock(&mutex);
-	if(latest_frame != NULL)
-		av_frame_free(&latest_frame);
-	latest_frame = decoded_frame;
-	video_bytes_window += length;
-	video_frames_window++;
-	imquic_mutex_unlock(&mutex);
 	av_packet_unref(&avpacket);
 	return 0;
 }
@@ -389,17 +411,7 @@ static void imquic_demo_process_video_buffer(void) {
 			}
 			props = props->next;
 		}
-		gboolean keyframe = (loc_extradata != NULL);
-		if(!keyframe) {
-			if(codec == DEMO_H264_ANNEXB || codec == DEMO_H264_SVC)
-				keyframe = imquic_demo_h264_is_keyframe(object->payload, object->payload_len);
-			else if(codec == DEMO_VP8)
-				keyframe = imquic_demo_vp8_is_keyframe(object->payload, object->payload_len);
-			else if(codec == DEMO_VP9 || codec == DEMO_VP9_SVC)
-				keyframe = imquic_demo_vp9_is_keyframe(object->payload, object->payload_len);
-			if(codec == DEMO_AV1)
-				keyframe = imquic_demo_av1_is_keyframe(object->payload, object->payload_len);
-		}
+		gboolean keyframe = imquic_demo_object_is_keyframe(object, loc_extradata);
 		if(imquic_demo_ensure_video_decoder(loc_extradata, keyframe) < 0) {
 			g_atomic_int_inc(&stop);
 			return;
@@ -905,17 +917,7 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 				return;
 			}
 			/* Check if it's a keyframe, looking in the payload if needed */
-			gboolean keyframe = (loc_extradata != NULL);
-			if(!keyframe) {
-				if(codec == DEMO_H264_ANNEXB || codec == DEMO_H264_SVC)
-					keyframe = imquic_demo_h264_is_keyframe(object->payload, object->payload_len);
-				else if(codec == DEMO_VP8)
-					keyframe = imquic_demo_vp8_is_keyframe(object->payload, object->payload_len);
-				else if(codec == DEMO_VP9 || codec == DEMO_VP9_SVC)
-					keyframe = imquic_demo_vp9_is_keyframe(object->payload, object->payload_len);
-				if(codec == DEMO_AV1)
-					keyframe = imquic_demo_av1_is_keyframe(object->payload, object->payload_len);
-			}
+			gboolean keyframe = imquic_demo_object_is_keyframe(object, loc_extradata);
 			if(imquic_demo_ensure_video_decoder(loc_extradata, keyframe) < 0) {
 				g_atomic_int_inc(&stop);
 				return;

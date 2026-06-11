@@ -267,6 +267,7 @@ static int imquic_demo_open_video_encoder_ctx(int width, int height, int fps, in
 		av_opt_set(videoenc_ctx->priv_data, "quality", "realtime", 0);
 		if(codec == DEMO_VP9) {
 			av_opt_set(videoenc_ctx->priv_data, "lag-in-frames", "0", 0);
+			av_opt_set_int(videoenc_ctx->priv_data, "auto-alt-ref", 0, 0);
 		}
 		av_opt_set(videoenc_ctx->priv_data, "tile-columns", "2", 0);
 		av_opt_set(videoenc_ctx->priv_data, "row-mt", "1", 0);

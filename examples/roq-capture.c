@@ -178,6 +178,7 @@ static int roq_capture_open_video_encoder(int width, int height, int fps, int bi
 			av_opt_set(videoenc_ctx->priv_data, "quality", "realtime", 0);
 			if(video_codec_id == DEMO_VP9)
 				av_opt_set(videoenc_ctx->priv_data, "lag-in-frames", "0", 0);
+			av_opt_set_int(videoenc_ctx->priv_data, "auto-alt-ref", 0, 0);
 			av_opt_set(videoenc_ctx->priv_data, "tile-columns", "2", 0);
 			av_opt_set(videoenc_ctx->priv_data, "row-mt", "1", 0);
 			av_opt_set(videoenc_ctx->priv_data, "threads", "2", 0);

@@ -80,7 +80,7 @@ void imquic_roq_vp9_depay_reset(imquic_roq_vp9_depay *depay);
 
 gboolean imquic_roq_rtp_depay_vp9(imquic_roq_vp9_depay *depay,
 	const uint8_t *payload, size_t payload_len, uint16_t seq, uint32_t timestamp,
-	uint8_t **frame, size_t *frame_len);
+	gboolean rtp_marker, uint8_t **frame, size_t *frame_len);
 
 /* RoQ SVC layer feedback (receiver -> sender) */
 #define IMQUIC_ROQ_SVC_FEEDBACK_FLOW_ID 99
