@@ -26,6 +26,7 @@
 #include <opus/opus.h>
 
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
 
 #include "moq-loc-recv-options.h"
 #include "moq-utils.h"
@@ -73,7 +74,7 @@ static gboolean video_fetch_completed = FALSE;
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
 static SDL_Texture *texture = NULL;
-static int screen_w = 640, screen_h = 360,
+static int screen_w = 1280, screen_h = 720,
 	texture_w = -1, texture_h = -1;
 static SDL_AudioDeviceID dev;
 static const char *imquic_demo_sdl_audioformat_str(SDL_AudioFormat format) {
@@ -101,6 +102,21 @@ static AVCodec *video_codec = NULL;
 static gboolean got_keyframe = FALSE;
 static AVFrame *latest_frame = NULL;
 static imquic_mutex mutex = IMQUIC_MUTEX_INITIALIZER;
+
+/* Video info overlay */
+#define IMQUIC_DEMO_FONT_SIZE 15
+#define IMQUIC_DEMO_OVERLAY_MAX_LINES 4
+static TTF_Font *overlay_font = NULL;
+static gboolean overlay_font_inited = FALSE;
+static char video_codec_str[64] = { 0 };
+static uint16_t video_catalog_width = 0, video_catalog_height = 0;
+static uint8_t video_catalog_framerate = 0;
+static uint32_t video_catalog_bitrate = 0;
+static size_t video_bytes_window = 0;
+static uint32_t video_frames_window = 0;
+static double video_measured_fps = 0;
+static double video_measured_bitrate = 0;
+static uint32_t video_stats_last_tick = 0;
 
 static int imquic_demo_create_audio_decoder(void) {
 	if(audio_tn == NULL)
@@ -236,6 +252,8 @@ static int imquic_demo_decode_video(uint8_t *buffer, size_t length, gboolean key
 	if(latest_frame != NULL)
 		av_frame_free(&latest_frame);
 	latest_frame = decoded_frame;
+	video_bytes_window += length;
+	video_frames_window++;
 	imquic_mutex_unlock(&mutex);
 	av_packet_unref(&avpacket);
 	return 0;
@@ -565,6 +583,12 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 						g_atomic_int_set(&stop, 1);
 						return;
 					}
+					if(track->codec != NULL)
+						g_strlcpy(video_codec_str, track->codec, sizeof(video_codec_str));
+					video_catalog_width = track->width;
+					video_catalog_height = track->height;
+					video_catalog_framerate = track->framerate;
+					video_catalog_bitrate = track->bitrate;
 				} else {
 					IMQUIC_LOG(IMQUIC_LOG_WARN, "  -- Unsupported '%s' track\n", track->role);
 				}
@@ -746,6 +770,171 @@ static void imquic_demo_connection_gone(imquic_connection *conn, uint64_t error_
 }
 
 /* SDL input handling and rendering */
+static const char *imquic_demo_font_paths[] = {
+	"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+	"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+	"/usr/share/fonts/TTF/DejaVuSans.ttf",
+	"/usr/share/fonts/dejavu/DejaVuSans.ttf",
+	"/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+	NULL
+};
+
+static void imquic_demo_format_bitrate(char *buf, size_t buflen, double bps) {
+	if(bps >= 1000000.0)
+		g_snprintf(buf, buflen, "%.2f Mbps", bps / 1000000.0);
+	else if(bps >= 1000.0)
+		g_snprintf(buf, buflen, "%.1f Kbps", bps / 1000.0);
+	else
+		g_snprintf(buf, buflen, "%.0f bps", bps);
+}
+
+static int imquic_demo_init_overlay_font(void) {
+	const char *const *path = imquic_demo_font_paths;
+
+	if(TTF_Init() < 0) {
+		IMQUIC_LOG(IMQUIC_LOG_WARN, "TTF_Init failed: %s (video overlay disabled)\n", TTF_GetError());
+		return -1;
+	}
+	overlay_font_inited = TRUE;
+	for(; *path != NULL; path++) {
+		overlay_font = TTF_OpenFont(*path, IMQUIC_DEMO_FONT_SIZE);
+		if(overlay_font != NULL) {
+			TTF_SetFontHinting(overlay_font, TTF_HINTING_LIGHT);
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "Using overlay font '%s'\n", *path);
+			return 0;
+		}
+	}
+	IMQUIC_LOG(IMQUIC_LOG_WARN, "Could not open overlay font: %s (video overlay disabled)\n", TTF_GetError());
+	return -1;
+}
+
+static void imquic_demo_destroy_overlay_font(void) {
+	if(overlay_font != NULL) {
+		TTF_CloseFont(overlay_font);
+		overlay_font = NULL;
+	}
+	if(overlay_font_inited) {
+		TTF_Quit();
+		overlay_font_inited = FALSE;
+	}
+}
+
+static void imquic_demo_update_video_stats(uint32_t ticks) {
+	uint32_t elapsed = 0;
+	if(video_stats_last_tick == 0) {
+		video_stats_last_tick = ticks;
+		return;
+	}
+	elapsed = ticks - video_stats_last_tick;
+	if(elapsed < 1000)
+		return;
+	imquic_mutex_lock(&mutex);
+	video_measured_fps = (double)video_frames_window * 1000.0 / (double)elapsed;
+	video_measured_bitrate = (double)video_bytes_window * 8.0 * 1000.0 / (double)elapsed;
+	video_bytes_window = 0;
+	video_frames_window = 0;
+	imquic_mutex_unlock(&mutex);
+	video_stats_last_tick = ticks;
+}
+
+static void imquic_demo_draw_overlay_line(SDL_Renderer *r, int x, int y, const char *line) {
+	SDL_Color white = { 255, 255, 255, 255 };
+	SDL_Surface *surface = NULL;
+	SDL_Texture *texture = NULL;
+	SDL_Rect dst = { 0 };
+
+	if(line == NULL || line[0] == '\0')
+		return;
+	surface = TTF_RenderUTF8_Blended(overlay_font, line, white);
+	if(surface == NULL)
+		return;
+	texture = SDL_CreateTextureFromSurface(r, surface);
+	dst.w = surface->w;
+	dst.h = surface->h;
+	SDL_FreeSurface(surface);
+	if(texture == NULL)
+		return;
+	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+	dst.x = x;
+	dst.y = y;
+	SDL_RenderCopy(r, texture, NULL, &dst);
+	SDL_DestroyTexture(texture);
+}
+
+static void imquic_demo_render_video_overlay(SDL_Renderer *r) {
+	char line_bufs[IMQUIC_DEMO_OVERLAY_MAX_LINES][128], bitrate_str[32];
+	const char *lines[IMQUIC_DEMO_OVERLAY_MAX_LINES];
+	SDL_Rect bg = { 0 };
+	int x = 10, y = 10, line_h = 0, max_w = 0, total_h = 0;
+	int width = 0, height = 0, line_count = 0, i = 0, lw = 0, lh = 0;
+	double fps = 0, bitrate = 0;
+
+	if(overlay_font == NULL)
+		return;
+	line_h = TTF_FontLineSkip(overlay_font);
+	imquic_mutex_lock(&mutex);
+	if(latest_frame != NULL) {
+		width = latest_frame->width;
+		height = latest_frame->height;
+	}
+	fps = video_measured_fps;
+	bitrate = video_measured_bitrate;
+	imquic_mutex_unlock(&mutex);
+	if(width <= 0 && video_catalog_width > 0)
+		width = video_catalog_width;
+	if(height <= 0 && video_catalog_height > 0)
+		height = video_catalog_height;
+	if(width <= 0 && height <= 0 && video_codec_str[0] == '\0')
+		return;
+	if(width > 0 && height > 0) {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Resolution: %dx%d", width, height);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
+	if(video_codec_str[0] != '\0') {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Codec: %s", video_codec_str);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
+	if(fps > 0.0) {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "FPS: %.1f", fps);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	} else if(video_catalog_framerate > 0) {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "FPS: %u", video_catalog_framerate);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
+	if(bitrate > 0.0) {
+		imquic_demo_format_bitrate(bitrate_str, sizeof(bitrate_str), bitrate);
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Bitrate: %s", bitrate_str);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	} else if(video_catalog_bitrate > 0) {
+		imquic_demo_format_bitrate(bitrate_str, sizeof(bitrate_str), (double)video_catalog_bitrate);
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Bitrate: %s", bitrate_str);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
+	if(line_count == 0)
+		return;
+	for(i = 0; i < line_count; i++) {
+		if(TTF_SizeUTF8(overlay_font, lines[i], &lw, &lh) == 0 && lw > max_w)
+			max_w = lw;
+	}
+	total_h = line_count * line_h;
+	SDL_SetRenderDrawColor(r, 32, 32, 32, 255);
+	bg.x = x - 8;
+	bg.y = y - 6;
+	bg.w = max_w + 16;
+	bg.h = total_h + 12;
+	SDL_RenderFillRect(r, &bg);
+	for(i = 0; i < line_count; i++) {
+		imquic_demo_draw_overlay_line(r, x, y, lines[i]);
+		y += line_h;
+	}
+}
+
 static int imquic_demo_handle_input(void) {
 	if(g_atomic_int_get(&stop))
 		return -1;
@@ -774,6 +963,7 @@ static int imquic_demo_render(void) {
 		last_tick = ticks;
 	/* Aim for about 30fps rendering independently of the video rate */
 	if(ticks - last_tick >= (1000/30)) {
+		imquic_demo_update_video_stats(ticks);
 		SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 		SDL_RenderClear(renderer);
 		imquic_mutex_lock(&mutex);
@@ -819,6 +1009,7 @@ static int imquic_demo_render(void) {
 			}
 			/* Render the texture */
 			SDL_RenderCopy(renderer, texture, NULL, (screen_ratio != texture_ratio ? &rect : NULL));
+			imquic_demo_render_video_overlay(renderer);
 		}
 		/* Render to the screen */
 		SDL_RenderPresent(renderer);
@@ -857,6 +1048,7 @@ int main(int argc, char *argv[]) {
 		IMQUIC_LOG_LOCPROP = IMQUIC_LOG_INFO;
 
 	/* Initialize SDL backends */
+	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
 	if(SDL_Init(SDL_INIT_TIMER | SDL_INIT_AUDIO) < 0) {
 		IMQUIC_LOG(IMQUIC_LOG_FATAL, "Error initializing SDL2: %s\n", SDL_GetError());
 		goto done;
@@ -983,6 +1175,7 @@ int main(int argc, char *argv[]) {
 				ret = 1;
 				goto done;
 			}
+			g_strlcpy(video_codec_str, imquic_demo_video_codec_str(codec), sizeof(video_codec_str));
 		}
 	}
 
@@ -1089,6 +1282,7 @@ int main(int argc, char *argv[]) {
 		IMQUIC_LOG(IMQUIC_LOG_FATAL, "Error creating renderer: %s\n", SDL_GetError());
 		goto done;
 	}
+	imquic_demo_init_overlay_font();
 	/* SDL audio playback */
 	SDL_AudioSpec want, have;
 	SDL_zero(want);
@@ -1141,6 +1335,7 @@ done:
 	imquic_moq_track_free(video_trackname);
 
 	/* SDL stuff */
+	imquic_demo_destroy_overlay_font();
 	if(texture != NULL)
 		SDL_DestroyTexture(texture);
 	SDL_Quit();

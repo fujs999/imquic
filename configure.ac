@@ -140,6 +140,7 @@ AC_ARG_ENABLE([moq-examples],
                                   libswscale
                                   opus
                                   sdl2
+                                  SDL2_ttf
                                  ],
                                  [enable_loc_demos=yes],
                                  [AC_MSG_WARN([Some dependencies not met, LOC demos will not be built])])
