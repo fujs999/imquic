@@ -122,6 +122,10 @@ static int imquic_demo_create_audio_encoder(void) {
 		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error opening audio encoder\n");
 		return -1;
 	}
+	if(opus_encoder_ctl(audioenc, OPUS_SET_BITRATE(options.audio_bitrate)) != OPUS_OK) {
+		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error setting audio bitrate to %d bps\n", options.audio_bitrate);
+		return -1;
+	}
 	/* SDL audio capture */
 	SDL_AudioSpec want, have;
 	SDL_zero(want);
@@ -202,7 +206,7 @@ static int imquic_demo_create_video_encoder(void) {
 	/* Create a video encoder */
 	int width = options.width, height = options.height, fps = options.video_framerate;
 	videoenc_ctx = avcodec_alloc_context3(video_codec);
-	videoenc_ctx->bit_rate = 1000 * 1024;
+	videoenc_ctx->bit_rate = options.video_bitrate;
 	videoenc_ctx->rc_max_rate = videoenc_ctx->bit_rate + (videoenc_ctx->bit_rate/10);
 	videoenc_ctx->rc_buffer_size = 2 * videoenc_ctx->bit_rate;
 	videoenc_ctx->width = width;
@@ -1041,6 +1045,9 @@ int main(int argc, char *argv[]) {
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "Using track name '%s' for audio\n", audio_tn);
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Will use track_alias=%"SCNu64"\n",
 			audio_track_alias);
+		if(options.audio_bitrate <= 0)
+			options.audio_bitrate = 32000;
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Will encode audio at %d bps\n", options.audio_bitrate);
 		/* Add the audio track to the catalog */
 		imquic_moq_catalog_track *track = imquic_moq_catalog_create_track(pub_tns, audio_tn, "loc", TRUE);
 		track->role = g_strdup("audio");
@@ -1049,7 +1056,7 @@ int main(int argc, char *argv[]) {
 		track->codec = g_strdup("opus");
 		track->samplerate = 48000;
 		track->channel_config = g_strdup("1");
-		track->bitrate = 32000;
+		track->bitrate = options.audio_bitrate;
 		imquic_moq_catalog_add_track(catalog, track);
 	}
 	if(options.video_track_name != NULL) {
@@ -1083,6 +1090,9 @@ int main(int argc, char *argv[]) {
 			options.video_framerate = 25;
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Will capture video at '%dx%d@%d'\n",
 			options.width, options.height, options.video_framerate);
+		if(options.video_bitrate <= 0)
+			options.video_bitrate = 1000 * 1024;
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Will encode video at %d bps\n", options.video_bitrate);
 		if(options.video_codec != NULL) {
 			codec = imquic_demo_video_codec_from_str(options.video_codec);
 			if(codec == DEMO_UNKOWN) {
@@ -1126,7 +1136,7 @@ int main(int argc, char *argv[]) {
 		track->width = options.width;
 		track->height = options.height;
 		track->framerate = options.video_framerate;
-		track->bitrate = 1000 * 1024;
+		track->bitrate = options.video_bitrate;
 		imquic_moq_catalog_add_track(catalog, track);
 	}
 
