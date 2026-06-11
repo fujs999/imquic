@@ -162,6 +162,7 @@ AC_ARG_ENABLE([roq-examples],
                                   libswscale
                                   opus
                                   sdl2
+                                  SDL2_ttf
                                  ],
                                  [enable_roq_capture=yes],
                                  [AC_MSG_WARN([Some dependencies not met, RoQ A/V support will not be built])])

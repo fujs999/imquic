@@ -19,6 +19,7 @@
 #include <opus/opus.h>
 
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
 
 #include "roq-display.h"
 #include "roq-utils.h"
@@ -27,6 +28,8 @@
 #define ROQ_DISPLAY_AUDIO_RATE 48000
 #define ROQ_DISPLAY_AUDIO_MAX_SAMPLES 1920
 #define ROQ_DISPLAY_AUDIO_MAX_QUEUE 10000
+#define ROQ_DISPLAY_FONT_SIZE 15
+#define ROQ_DISPLAY_OVERLAY_MAX_LINES 4
 
 typedef struct roq_h264_depay {
 	GByteArray *access_unit;
@@ -55,6 +58,23 @@ static AVFrame *latest_frame = NULL;
 static imquic_mutex frame_mutex = IMQUIC_MUTEX_INITIALIZER;
 static uint32_t last_render_tick = 0;
 static gboolean sdl_video_inited = FALSE, sdl_audio_inited = FALSE;
+
+static TTF_Font *overlay_font = NULL;
+static gboolean overlay_font_inited = FALSE;
+static size_t video_bytes_window = 0;
+static uint32_t video_frames_window = 0;
+static double video_measured_fps = 0;
+static double video_measured_bitrate = 0;
+static uint32_t video_stats_last_tick = 0;
+
+static const char *roq_display_font_paths[] = {
+	"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+	"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+	"/usr/share/fonts/TTF/DejaVuSans.ttf",
+	"/usr/share/fonts/dejavu/DejaVuSans.ttf",
+	"/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+	NULL
+};
 
 static void roq_display_reset_depay(void) {
 	if(depay.access_unit != NULL)
@@ -239,6 +259,148 @@ static int roq_display_create_decoder(void) {
 	return 0;
 }
 
+static void roq_display_format_bitrate(char *buf, size_t buflen, double bps) {
+	if(bps >= 1000000.0)
+		g_snprintf(buf, buflen, "%.2f Mbps", bps / 1000000.0);
+	else if(bps >= 1000.0)
+		g_snprintf(buf, buflen, "%.1f Kbps", bps / 1000.0);
+	else
+		g_snprintf(buf, buflen, "%.0f bps", bps);
+}
+
+static int roq_display_init_overlay_font(void) {
+	const char *const *path = roq_display_font_paths;
+
+	if(TTF_Init() < 0) {
+		IMQUIC_LOG(IMQUIC_LOG_WARN, "TTF_Init failed: %s (video overlay disabled)\n", TTF_GetError());
+		return -1;
+	}
+	overlay_font_inited = TRUE;
+	for(; *path != NULL; path++) {
+		overlay_font = TTF_OpenFont(*path, ROQ_DISPLAY_FONT_SIZE);
+		if(overlay_font != NULL) {
+			TTF_SetFontHinting(overlay_font, TTF_HINTING_LIGHT);
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "Using overlay font '%s'\n", *path);
+			return 0;
+		}
+	}
+	IMQUIC_LOG(IMQUIC_LOG_WARN, "Could not open overlay font: %s (video overlay disabled)\n", TTF_GetError());
+	return -1;
+}
+
+static void roq_display_destroy_overlay_font(void) {
+	if(overlay_font != NULL) {
+		TTF_CloseFont(overlay_font);
+		overlay_font = NULL;
+	}
+	if(overlay_font_inited) {
+		TTF_Quit();
+		overlay_font_inited = FALSE;
+	}
+}
+
+static void roq_display_update_video_stats(uint32_t ticks) {
+	uint32_t elapsed = 0;
+
+	if(video_stats_last_tick == 0) {
+		video_stats_last_tick = ticks;
+		return;
+	}
+	elapsed = ticks - video_stats_last_tick;
+	if(elapsed < 1000)
+		return;
+	imquic_mutex_lock(&frame_mutex);
+	video_measured_fps = (double)video_frames_window * 1000.0 / (double)elapsed;
+	video_measured_bitrate = (double)video_bytes_window * 8.0 * 1000.0 / (double)elapsed;
+	video_bytes_window = 0;
+	video_frames_window = 0;
+	imquic_mutex_unlock(&frame_mutex);
+	video_stats_last_tick = ticks;
+}
+
+static void roq_display_draw_overlay_line(SDL_Renderer *r, int x, int y, const char *line) {
+	SDL_Color white = { 255, 255, 255, 255 };
+	SDL_Surface *surface = NULL;
+	SDL_Texture *line_texture = NULL;
+	SDL_Rect dst = { 0 };
+
+	if(line == NULL || line[0] == '\0')
+		return;
+	surface = TTF_RenderUTF8_Blended(overlay_font, line, white);
+	if(surface == NULL)
+		return;
+	line_texture = SDL_CreateTextureFromSurface(r, surface);
+	dst.w = surface->w;
+	dst.h = surface->h;
+	SDL_FreeSurface(surface);
+	if(line_texture == NULL)
+		return;
+	SDL_SetTextureBlendMode(line_texture, SDL_BLENDMODE_BLEND);
+	dst.x = x;
+	dst.y = y;
+	SDL_RenderCopy(r, line_texture, NULL, &dst);
+	SDL_DestroyTexture(line_texture);
+}
+
+static void roq_display_render_video_overlay(SDL_Renderer *r) {
+	char line_bufs[ROQ_DISPLAY_OVERLAY_MAX_LINES][128], bitrate_str[32];
+	const char *lines[ROQ_DISPLAY_OVERLAY_MAX_LINES];
+	SDL_Rect bg = { 0 };
+	int x = 10, y = 10, line_h = 0, max_w = 0, total_h = 0;
+	int width = 0, height = 0, line_count = 0, i = 0, lw = 0, lh = 0;
+	double fps = 0, bitrate = 0;
+
+	if(overlay_font == NULL)
+		return;
+	line_h = TTF_FontLineSkip(overlay_font);
+	imquic_mutex_lock(&frame_mutex);
+	if(latest_frame != NULL) {
+		width = latest_frame->width;
+		height = latest_frame->height;
+	}
+	fps = video_measured_fps;
+	bitrate = video_measured_bitrate;
+	imquic_mutex_unlock(&frame_mutex);
+	if(width <= 0 && height <= 0 && fps <= 0.0 && bitrate <= 0.0)
+		return;
+	if(width > 0 && height > 0) {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Resolution: %dx%d", width, height);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
+	g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Codec: H.264");
+	lines[line_count] = line_bufs[line_count];
+	line_count++;
+	if(fps > 0.0) {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "FPS: %.1f", fps);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
+	if(bitrate > 0.0) {
+		roq_display_format_bitrate(bitrate_str, sizeof(bitrate_str), bitrate);
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Bitrate: %s", bitrate_str);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
+	if(line_count == 0)
+		return;
+	for(i = 0; i < line_count; i++) {
+		if(TTF_SizeUTF8(overlay_font, lines[i], &lw, &lh) == 0 && lw > max_w)
+			max_w = lw;
+	}
+	total_h = line_count * line_h;
+	SDL_SetRenderDrawColor(r, 32, 32, 32, 255);
+	bg.x = x - 8;
+	bg.y = y - 6;
+	bg.w = max_w + 16;
+	bg.h = total_h + 12;
+	SDL_RenderFillRect(r, &bg);
+	for(i = 0; i < line_count; i++) {
+		roq_display_draw_overlay_line(r, x, y, lines[i]);
+		y += line_h;
+	}
+}
+
 static int roq_display_decode_access_unit(uint8_t *buffer, size_t length, gboolean keyframe) {
 	if(videodec_ctx == NULL)
 		return -1;
@@ -275,6 +437,8 @@ static int roq_display_decode_access_unit(uint8_t *buffer, size_t length, gboole
 	if(latest_frame != NULL)
 		av_frame_free(&latest_frame);
 	latest_frame = decoded_frame;
+	video_bytes_window += length;
+	video_frames_window++;
 	imquic_mutex_unlock(&frame_mutex);
 	return 0;
 }
@@ -374,6 +538,7 @@ int roq_display_init(const roq_display_config *config) {
 			IMQUIC_LOG(IMQUIC_LOG_ERR, "Error creating renderer: %s\n", SDL_GetError());
 			return -1;
 		}
+		roq_display_init_overlay_font();
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "Video display enabled (flow=%"SCNi64", pt=%u, window=%dx%d)\n",
 			cfg.video_flow, cfg.video_pt, screen_w, screen_h);
 	}
@@ -419,6 +584,7 @@ int roq_display_render(void) {
 	if(ticks - last_render_tick < (1000 / 30))
 		return 0;
 	last_render_tick = ticks;
+	roq_display_update_video_stats(ticks);
 
 	SDL_Rect rect = { 0 };
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
@@ -434,11 +600,13 @@ int roq_display_render(void) {
 			texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_YV12,
 				SDL_TEXTUREACCESS_STATIC, texture_w, texture_h);
 		}
-		if(texture != NULL) {
+		if(texture != NULL)
 			SDL_UpdateYUVTexture(texture, NULL,
 				latest_frame->data[0], latest_frame->linesize[0],
 				latest_frame->data[1], latest_frame->linesize[1],
 				latest_frame->data[2], latest_frame->linesize[2]);
+		imquic_mutex_unlock(&frame_mutex);
+		if(texture != NULL) {
 			double screen_ratio = (double)screen_w / (double)screen_h;
 			double texture_ratio = (double)texture_w / (double)texture_h;
 			if(screen_ratio > texture_ratio) {
@@ -456,9 +624,11 @@ int roq_display_render(void) {
 			}
 			SDL_RenderCopy(renderer, texture, NULL,
 				(screen_ratio != texture_ratio ? &rect : NULL));
+			roq_display_render_video_overlay(renderer);
 		}
+	} else {
+		imquic_mutex_unlock(&frame_mutex);
 	}
-	imquic_mutex_unlock(&frame_mutex);
 	SDL_RenderPresent(renderer);
 	SDL_Delay(10);
 	return 0;
@@ -494,6 +664,7 @@ void roq_display_destroy(void) {
 		SDL_DestroyWindow(window);
 		window = NULL;
 	}
+	roq_display_destroy_overlay_font();
 	if(depay.access_unit != NULL) {
 		g_byte_array_free(depay.access_unit, TRUE);
 		depay.access_unit = NULL;
