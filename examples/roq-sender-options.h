@@ -15,10 +15,21 @@
 
 /*! \brief Struct containing the parsed command line options */
 typedef struct demo_options {
+	gboolean capture;
 	int audio_flow;
 	int audio_port;
+	int audio_bitrate;
+	int audio_pt;
 	int video_flow;
 	int video_port;
+	int video_bitrate;
+	int video_pt;
+	int width;
+	int height;
+	int video_framerate;
+	const char *video_format;
+	const char *video_device;
+	const char *video_resolution;
 	const char *multiplexing;
 	int timeout;
 	gboolean client;
@@ -39,6 +50,7 @@ typedef struct demo_options {
 	gboolean qlog_sequential;
 	gboolean qlog_roq_packets;
 	gboolean quiet;
+	gboolean debug_ffmpeg;
 	int debug_level;
 	gboolean debug_locks;
 	gboolean debug_refcounts;

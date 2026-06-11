@@ -152,9 +152,23 @@ AM_CONDITIONAL([ENABLE_LOC_DEMOS], [test "x$enable_loc_demos" = "xyes"])
 AC_ARG_ENABLE([roq-examples],
               [AS_HELP_STRING([--enable-roq-examples],
                               [Build the RoQ (RTP Over QUIC) examples])],
-              [],
+              [
+               PKG_CHECK_MODULES([ROQAV],
+                                 [
+                                  libavutil
+                                  libavcodec
+                                  libavformat
+                                  libavdevice
+                                  libswscale
+                                  opus
+                                  sdl2
+                                 ],
+                                 [enable_roq_capture=yes],
+                                 [AC_MSG_WARN([Some dependencies not met, RoQ capture support will not be built])])
+              ],
               [enable_roq_examples=no])
 AM_CONDITIONAL([ENABLE_ROQ_EXAMPLES], [test "x$enable_roq_examples" = "xyes"])
+AM_CONDITIONAL([ENABLE_ROQ_CAPTURE], [test "x$enable_roq_capture" = "xyes"])
 
 ##
 # Docs
@@ -228,7 +242,12 @@ AM_COND_IF([ENABLE_MOQ_EXAMPLES],
 	],
 	[echo "  -- MoQ examples:  no"])
 AM_COND_IF([ENABLE_ROQ_EXAMPLES],
-	[echo "  -- RoQ examples:  yes"],
+	[
+	 echo "  -- RoQ examples:  yes"
+	 AM_COND_IF([ENABLE_ROQ_CAPTURE],
+	     [echo "  -- -- Capture:   yes"],
+	     [echo "  -- -- Capture:   no"])
+	],
 	[echo "  -- RoQ examples:  no"])
 
 echo

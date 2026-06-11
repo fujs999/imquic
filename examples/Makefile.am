@@ -114,6 +114,8 @@ bin_PROGRAMS += imquic-moq-loc-send imquic-moq-loc-recv
 
 imquic_moq_loc_send_SOURCES = \
 	moq-loc-send.c \
+	moq-loc-abr.c \
+	moq-loc-abr.h \
 	moq-loc-send-options.c \
 	moq-loc-send-options.h \
 	moq-utils.c \
@@ -176,7 +178,9 @@ imquic_roq_receiver_LDADD = \
 imquic_roq_sender_SOURCES = \
 	roq-sender.c \
 	roq-sender-options.c \
-	roq-sender-options.h
+	roq-sender-options.h \
+	roq-utils.c \
+	roq-utils.h
 imquic_roq_sender_CFLAGS = \
 	$(AM_CFLAGS) \
 	$(IMQUIC_CFLAGS) \
@@ -187,6 +191,19 @@ imquic_roq_sender_LDADD = \
 	$(IMQUIC_MANUAL_LIBS) \
 	-L../src/.libs -limquic \
 	$(NULL)
+
+if ENABLE_ROQ_CAPTURE
+
+imquic_roq_sender_SOURCES += \
+	roq-capture.c \
+	roq-capture.h
+imquic_roq_sender_CFLAGS += \
+	$(ROQAV_CFLAGS) \
+	-DHAVE_ROQ_CAPTURE
+imquic_roq_sender_LDADD += \
+	$(ROQAV_LIBS)
+
+endif
 
 endif
 

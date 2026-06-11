@@ -15,6 +15,18 @@ static GOptionContext *opts = NULL;
 gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
 	/* Supported command-line arguments */
 	GOptionEntry opt_entries[] = {
+#ifdef HAVE_ROQ_CAPTURE
+		{ "capture", 0, 0, G_OPTION_ARG_NONE, &options->capture, "Capture audio/video locally, encode and send as RTP (default=no)", NULL },
+		{ "audio-bitrate", 'B', 0, G_OPTION_ARG_INT, &options->audio_bitrate, "When capturing, audio encoding bitrate in bits per second (default=32000)", "bps" },
+		{ "video-bitrate", 'E', 0, G_OPTION_ARG_INT, &options->video_bitrate, "When capturing, video encoding bitrate in bits per second (default=1048576)", "bps" },
+		{ "video-format", 'f', 0, G_OPTION_ARG_STRING, &options->video_format, "When capturing, video input format using FFmpeg names (default=v4l2)", "format" },
+		{ "video-device", 'i', 0, G_OPTION_ARG_STRING, &options->video_device, "When capturing, video device to capture from (default=/dev/video0)", "device" },
+		{ "video-resolution", 'W', 0, G_OPTION_ARG_STRING, &options->video_resolution, "When capturing, video resolution to capture (default=640x480)", "resolution" },
+		{ "video-framerate", 'F', 0, G_OPTION_ARG_INT, &options->video_framerate, "When capturing, video framerate in frames per second (default=25)", "fps" },
+		{ "audio-pt", 'P', 0, G_OPTION_ARG_INT, &options->audio_pt, "When capturing, RTP payload type for Opus audio (default=111)", "pt" },
+		{ "video-pt", 'T', 0, G_OPTION_ARG_INT, &options->video_pt, "When capturing, RTP payload type for H.264 video (default=96)", "pt" },
+		{ "debug-ffmpeg", 'D', 0, G_OPTION_ARG_NONE, &options->debug_ffmpeg, "When capturing, verbosely debug FFmpeg (default=no)", NULL },
+#endif
 		{ "audio-port", 'a', 0, G_OPTION_ARG_INT, &options->audio_port, "Port to bind to for incoming audio RTP packets (default=none)", "port" },
 		{ "audio-flow", 'A', 0, G_OPTION_ARG_INT, &options->audio_flow, "Flow ID of the audio RTP stream (default=none)", "number" },
 		{ "video-port", 'v', 0, G_OPTION_ARG_INT, &options->video_port, "Port to bind to for incoming video RTP packets (default=none)", "port" },

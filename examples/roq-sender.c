@@ -10,14 +10,6 @@
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#if defined (__MACH__) || defined(__FreeBSD__)
-#include <machine/endian.h>
-#define __BYTE_ORDER BYTE_ORDER
-#define __BIG_ENDIAN BIG_ENDIAN
-#define __LITTLE_ENDIAN LITTLE_ENDIAN
-#else
-#include <endian.h>
-#endif
 #include <unistd.h>
 #include <poll.h>
 
@@ -25,6 +17,10 @@
 #include <imquic/roq.h>
 
 #include "roq-sender-options.h"
+#include "roq-utils.h"
+#ifdef HAVE_ROQ_CAPTURE
+#include "roq-capture.h"
+#endif
 
 /* Command line options */
 static demo_options options = { 0 };
@@ -52,34 +48,45 @@ static void imquic_demo_handle_signal(int signum) {
 static GHashTable *connections = NULL;
 static imquic_mutex mutex = IMQUIC_MUTEX_INITIALIZER;
 
-/* RTP header */
-typedef struct imquic_rtp_header {
-#if __BYTE_ORDER == __BIG_ENDIAN
-	uint16_t version:2;
-	uint16_t padding:1;
-	uint16_t extension:1;
-	uint16_t csrccount:4;
-	uint16_t markerbit:1;
-	uint16_t type:7;
-#elif __BYTE_ORDER == __LITTLE_ENDIAN
-	uint16_t csrccount:4;
-	uint16_t extension:1;
-	uint16_t padding:1;
-	uint16_t version:2;
-	uint16_t type:7;
-	uint16_t markerbit:1;
+/* RoQ multiplexing (set during init) */
+static imquic_roq_multiplexing multiplexing;
+static const char *mode = NULL;
+static gboolean one_stream_per_packet = FALSE;
+
+#ifdef HAVE_ROQ_CAPTURE
+static volatile int capture_active = 0;
 #endif
-	uint16_t seq_number;
-	uint32_t timestamp;
-	uint32_t ssrc;
-	uint32_t csrc[0];
-} imquic_rtp_header;
-static gboolean imquic_is_rtp(uint8_t *buf, guint len) {
-	if (len < 12)
-		return FALSE;
-	imquic_rtp_header *header = (imquic_rtp_header *)buf;
-	return ((header->type < 64) || (header->type >= 96));
+
+static void imquic_demo_send_rtp_to_connections(uint64_t flow_id, uint8_t *buffer, size_t bytes) {
+	GHashTableIter iter;
+	gpointer value;
+	size_t sent = 0;
+	imquic_mutex_lock(&mutex);
+	g_hash_table_iter_init(&iter, connections);
+	while(g_hash_table_iter_next(&iter, NULL, &value)) {
+		imquic_connection *roq_conn = (imquic_connection *)value;
+		sent = imquic_roq_send_rtp(roq_conn, multiplexing, flow_id, buffer, bytes, one_stream_per_packet);
+		if(sent == 0) {
+			IMQUIC_LOG(IMQUIC_LOG_WARN, "[%s] Couldn't send RTP packet...\n",
+				imquic_get_connection_name(roq_conn));
+		} else if(!options.quiet) {
+			imquic_roq_rtp_header *rtp = (imquic_roq_rtp_header *)buffer;
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s]  -- [%s][flow=%"SCNu64"][%zu] ssrc=%"SCNu32", pt=%"SCNu16", seq=%"SCNu16", ts=%"SCNu32"\n",
+				imquic_get_connection_name(roq_conn),
+				mode, flow_id, bytes,
+				ntohl(rtp->ssrc), rtp->type, ntohs(rtp->seq_number), ntohl(rtp->timestamp));
+		}
+	}
+	imquic_mutex_unlock(&mutex);
 }
+
+#ifdef HAVE_ROQ_CAPTURE
+static void imquic_demo_capture_rtp(uint64_t flow_id, uint8_t *rtp, size_t rtp_len, void *user_data) {
+	if(!g_atomic_int_get(&capture_active))
+		return;
+	imquic_demo_send_rtp_to_connections(flow_id, rtp, rtp_len);
+}
+#endif
 
 /* Callbacks */
 static void imquic_demo_new_connection(imquic_connection *conn, void *user_data) {
@@ -92,21 +99,28 @@ static void imquic_demo_new_connection(imquic_connection *conn, void *user_data)
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s]   -- %s (%s)\n", imquic_get_connection_name(conn),
 		imquic_is_connection_webtransport(conn) ? "WebTransport" : "Raw QUIC",
 		imquic_is_connection_webtransport(conn) ? imquic_get_connection_wt_protocol(conn) : imquic_get_connection_alpn(conn));
+#ifdef HAVE_ROQ_CAPTURE
+	if(options.capture && !g_atomic_int_get(&capture_active)) {
+		g_atomic_int_set(&capture_active, 1);
+		roq_capture_start();
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "Started local audio/video capture\n");
+	}
+#endif
 }
 
-static void imquic_demo_rtp_incoming(imquic_connection *conn, imquic_roq_multiplexing multiplexing,
+static void imquic_demo_rtp_incoming(imquic_connection *conn, imquic_roq_multiplexing mplex,
 		uint64_t flow_id, uint8_t *bytes, size_t blen) {
 	/* If this is called, it means the receiver we're sending RTP packets to
 	 * sent us something back (e.g., the imquic RoQ receiver in echo mode) */
-	if(!imquic_is_rtp(bytes, blen)) {
+	if(!imquic_roq_is_rtp(bytes, blen)) {
 		IMQUIC_LOG(IMQUIC_LOG_WARN, "[%s]  -- [flow=%"SCNu64"][%zu] Not an RTP packet\n",
 			imquic_get_connection_name(conn), flow_id, blen);
 		return;
 	}
-	imquic_rtp_header *rtp = (imquic_rtp_header *)bytes;
+	imquic_roq_rtp_header *rtp = (imquic_roq_rtp_header *)bytes;
 	if(!options.quiet) {
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s][recv]  -- [%s][flow=%"SCNu64"][%zu] ssrc=%"SCNu32", pt=%d, seq=%"SCNu16", ts=%"SCNu32"\n",
-			imquic_get_connection_name(conn), imquic_roq_multiplexing_str(multiplexing), flow_id, blen,
+			imquic_get_connection_name(conn), imquic_roq_multiplexing_str(mplex), flow_id, blen,
 			ntohl(rtp->ssrc), rtp->type, ntohs(rtp->seq_number), ntohl(rtp->timestamp));
 	}
 }
@@ -126,7 +140,15 @@ static void imquic_demo_connection_gone(imquic_connection *conn, uint64_t error_
 	imquic_mutex_lock(&mutex);
 	if(g_hash_table_remove(connections, conn))
 		imquic_connection_unref(conn);
+	gboolean no_connections = (g_hash_table_size(connections) == 0);
 	imquic_mutex_unlock(&mutex);
+#ifdef HAVE_ROQ_CAPTURE
+	if(options.capture && no_connections && g_atomic_int_get(&capture_active)) {
+		g_atomic_int_set(&capture_active, 0);
+		roq_capture_pause();
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "Paused local audio/video capture (no active connections)\n");
+	}
+#endif
 	if(options.client) {
 		/* Stop here */
 		g_atomic_int_inc(&stop);
@@ -148,6 +170,11 @@ int main(int argc, char *argv[]) {
 	options.audio_port = -1;
 	options.video_flow = -1;
 	options.video_port = -1;
+	options.audio_bitrate = 32000;
+	options.video_bitrate = 1048576;
+	options.video_framerate = 25;
+	options.audio_pt = 111;
+	options.video_pt = 96;
 	/* Let's call our cmdline parser */
 	if(!demo_options_parse(&options, argc, argv)) {
 		demo_options_show_usage();
@@ -189,11 +216,63 @@ int main(int argc, char *argv[]) {
 		if(options.client)
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Ticket file '%s'\n", options.ticket_file);
 	}
-	if(options.audio_port <= 0 && options.video_port <= 0) {
-		IMQUIC_LOG(IMQUIC_LOG_FATAL, "No local audio/video RTP port specified\n");
+
+#ifdef HAVE_ROQ_CAPTURE
+	gboolean capture_audio = FALSE, capture_video = FALSE;
+	if(options.capture) {
+		capture_audio = (options.audio_flow >= 0);
+		capture_video = (options.video_flow >= 0);
+		if(!capture_audio && !capture_video) {
+			IMQUIC_LOG(IMQUIC_LOG_FATAL, "Capture mode requires at least one of --audio-flow or --video-flow\n");
+			ret = 1;
+			goto done;
+		}
+		if(options.video_resolution == NULL)
+			options.video_resolution = "640x480";
+		if(sscanf(options.video_resolution, "%dx%d", &options.width, &options.height) != 2 ||
+				options.width <= 0 || options.height <= 0) {
+			IMQUIC_LOG(IMQUIC_LOG_FATAL, "Invalid video resolution\n");
+			ret = 1;
+			goto done;
+		}
+		if(options.video_format == NULL)
+			options.video_format = "v4l2";
+		if(options.video_device == NULL)
+			options.video_device = "/dev/video0";
+		if(options.video_framerate <= 0)
+			options.video_framerate = 25;
+		if(options.audio_pt < 0 || options.audio_pt > 127 || options.video_pt < 0 || options.video_pt > 127) {
+			IMQUIC_LOG(IMQUIC_LOG_FATAL, "Invalid RTP payload type\n");
+			ret = 1;
+			goto done;
+		}
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "Capture mode enabled\n");
+		if(capture_audio) {
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Audio: flow ID %d, Opus at %d bps, PT=%d\n",
+				options.audio_flow, options.audio_bitrate, options.audio_pt);
+		}
+		if(capture_video) {
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Video: flow ID %d, %dx%d@%d, H.264 at %d bps, PT=%d\n",
+				options.video_flow, options.width, options.height, options.video_framerate,
+				options.video_bitrate, options.video_pt);
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Video device '%s' (%s)\n", options.video_device, options.video_format);
+		}
+	} else
+#endif
+	{
+		if(options.audio_port <= 0 && options.video_port <= 0) {
+			IMQUIC_LOG(IMQUIC_LOG_FATAL, "No local audio/video RTP port specified (or use --capture)\n");
+			ret = 1;
+			goto done;
+		}
+	}
+#ifndef HAVE_ROQ_CAPTURE
+	if(options.capture) {
+		IMQUIC_LOG(IMQUIC_LOG_FATAL, "Capture support not compiled in (install FFmpeg, Opus, SDL2 and rebuild with --enable-roq-examples)\n");
 		ret = 1;
 		goto done;
 	}
+#endif
 	if(options.audio_port > 0 && options.audio_flow < 0) {
 		IMQUIC_LOG(IMQUIC_LOG_FATAL, "Invalid audio flow ID\n");
 		ret = 1;
@@ -204,15 +283,12 @@ int main(int argc, char *argv[]) {
 		ret = 1;
 		goto done;
 	}
-	if(options.audio_port > 0 && options.video_port > 0 && options.audio_flow == options.video_flow) {
+	if(options.audio_flow >= 0 && options.video_flow >= 0 && options.audio_flow == options.video_flow) {
 		IMQUIC_LOG(IMQUIC_LOG_FATAL, "Audio and video flow IDs must be different\n");
 		ret = 1;
 		goto done;
 	}
 	/* We support different multiplexing modes for RoQ */
-	imquic_roq_multiplexing multiplexing;
-	const char *mode = NULL;
-	gboolean one_stream_per_packet = FALSE;
 	if(options.multiplexing == NULL || !strcasecmp(options.multiplexing, "datagram")) {
 		multiplexing = IMQUIC_ROQ_DATAGRAM;
 		mode = "DATAGRAM";
@@ -232,33 +308,38 @@ int main(int argc, char *argv[]) {
 		goto done;
 	}
 
-	/* Create the audio and/or video sockets */
-	if(options.audio_port > 0) {
-		IMQUIC_LOG(IMQUIC_LOG_INFO, "Audio: port %d, flow ID %d\n", options.audio_port, options.audio_flow);
-		audio_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-		struct sockaddr_in address = { 0 };
-		address.sin_family = AF_INET;
-		address.sin_port = g_htons(options.audio_port);
-		address.sin_addr.s_addr = INADDR_ANY;
-		if(bind(audio_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-			IMQUIC_LOG(IMQUIC_LOG_ERR, "Bind to audio port '%"SCNu16" failed... %d (%s)\n",
-				options.audio_port, errno, g_strerror(errno));
-			ret = 1;
-			goto done;
+#ifndef HAVE_ROQ_CAPTURE
+	if(!options.capture)
+#endif
+	{
+		/* Create the audio and/or video sockets */
+		if(options.audio_port > 0) {
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "Audio: port %d, flow ID %d\n", options.audio_port, options.audio_flow);
+			audio_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+			struct sockaddr_in address = { 0 };
+			address.sin_family = AF_INET;
+			address.sin_port = g_htons(options.audio_port);
+			address.sin_addr.s_addr = INADDR_ANY;
+			if(bind(audio_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+				IMQUIC_LOG(IMQUIC_LOG_ERR, "Bind to audio port '%"SCNu16" failed... %d (%s)\n",
+					options.audio_port, errno, g_strerror(errno));
+				ret = 1;
+				goto done;
+			}
 		}
-	}
-	if(options.video_port > 0) {
-		IMQUIC_LOG(IMQUIC_LOG_INFO, "Video: port %d, flow ID %d\n", options.video_port, options.video_flow);
-		video_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-		struct sockaddr_in address = { 0 };
-		address.sin_family = AF_INET;
-		address.sin_port = g_htons(options.video_port);
-		address.sin_addr.s_addr = INADDR_ANY;
-		if(bind(video_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-			IMQUIC_LOG(IMQUIC_LOG_ERR, "Bind to video port '%"SCNu16" failed... %d (%s)\n",
-				options.video_port, errno, g_strerror(errno));
-			ret = 1;
-			goto done;
+		if(options.video_port > 0) {
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "Video: port %d, flow ID %d\n", options.video_port, options.video_flow);
+			video_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+			struct sockaddr_in address = { 0 };
+			address.sin_family = AF_INET;
+			address.sin_port = g_htons(options.video_port);
+			address.sin_addr.s_addr = INADDR_ANY;
+			if(bind(video_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+				IMQUIC_LOG(IMQUIC_LOG_ERR, "Bind to video port '%"SCNu16" failed... %d (%s)\n",
+					options.video_port, errno, g_strerror(errno));
+				ret = 1;
+				goto done;
+			}
 		}
 	}
 
@@ -288,6 +369,32 @@ int main(int argc, char *argv[]) {
 	if(options.quiet)
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "Quiet mode (won't print RTP packets)\n");
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "\n");
+
+#ifdef HAVE_ROQ_CAPTURE
+	if(options.capture) {
+		roq_capture_config capture_cfg = {
+			.capture_audio = capture_audio,
+			.audio_flow = options.audio_flow,
+			.audio_bitrate = options.audio_bitrate,
+			.audio_pt = (uint8_t)options.audio_pt,
+			.capture_video = capture_video,
+			.video_flow = options.video_flow,
+			.video_bitrate = options.video_bitrate,
+			.width = options.width,
+			.height = options.height,
+			.video_framerate = options.video_framerate,
+			.video_format = options.video_format,
+			.video_device = options.video_device,
+			.video_resolution = options.video_resolution,
+			.video_pt = (uint8_t)options.video_pt,
+			.debug_ffmpeg = options.debug_ffmpeg
+		};
+		if(roq_capture_init(&capture_cfg, imquic_demo_capture_rtp, NULL) < 0) {
+			ret = 1;
+			goto done;
+		}
+	}
+#endif
 
 	/* Initialize the library and create a client or server endpoint */
 	if(imquic_init(options.secrets_log) < 0) {
@@ -366,93 +473,81 @@ int main(int argc, char *argv[]) {
 	connections = g_hash_table_new(NULL, NULL);
 	imquic_start_endpoint(endpoint);
 
-	/* Wait for incoming RTP packets */
-	socklen_t addrlen;
-	struct sockaddr_storage remote;
-	int resfd = 0, bytes = 0, num = 0, i = 0;
-	struct pollfd fds[2];
-	uint8_t buffer[1500];
-	size_t sent = 0;
-	int64_t now = g_get_monotonic_time(), before = now;
-	uint64_t flow_id = 0;
-	/* Loop */
-	while(!g_atomic_int_get(&stop)) {
-		now = g_get_monotonic_time();
-		if(options.timeout > 0 && (now - before >= options.timeout*G_USEC_PER_SEC)) {
-			IMQUIC_LOG(IMQUIC_LOG_WARN, "%d seconds with no RTP traffic, shutting down...\n",
-				options.timeout);
-			break;
-		}
-		num = 0;
-		if(audio_fd != -1) {
-			fds[num].fd = audio_fd;
-			fds[num].events = POLLIN;
-			fds[num].revents = 0;
-			num++;
-		}
-		if(video_fd != -1) {
-			fds[num].fd = video_fd;
-			fds[num].events = POLLIN;
-			fds[num].revents = 0;
-			num++;
-		}
-		if(num == 0)
-			break;
-		/* Wait for some data */
-		resfd = poll(fds, num, 100);
-		if(resfd < 0) {
-			if(errno == EINTR) {
-				IMQUIC_LOG(IMQUIC_LOG_HUGE, "Got an EINTR (%s), ignoring...\n", g_strerror(errno));
-				continue;
+#ifdef HAVE_ROQ_CAPTURE
+	if(options.capture) {
+		while(!g_atomic_int_get(&stop))
+			g_usleep(100000);
+	} else
+#endif
+	{
+		/* Wait for incoming RTP packets */
+		socklen_t addrlen;
+		struct sockaddr_storage remote;
+		int resfd = 0, bytes = 0, num = 0, i = 0;
+		struct pollfd fds[2];
+		uint8_t buffer[1500];
+		int64_t now = g_get_monotonic_time(), before = now;
+		uint64_t flow_id = 0;
+		/* Loop */
+		while(!g_atomic_int_get(&stop)) {
+			now = g_get_monotonic_time();
+			if(options.timeout > 0 && (now - before >= options.timeout*G_USEC_PER_SEC)) {
+				IMQUIC_LOG(IMQUIC_LOG_WARN, "%d seconds with no RTP traffic, shutting down...\n",
+					options.timeout);
+				break;
 			}
-			IMQUIC_LOG(IMQUIC_LOG_ERR, "Error polling... %d (%s)\n", errno, g_strerror(errno));
-			break;
-		}
-		for(i=0; i<num; i++) {
-			if(fds[i].revents & (POLLERR | POLLHUP)) {
-				/* Socket error? */
-				IMQUIC_LOG(IMQUIC_LOG_ERR, "Error polling %s RTP socket: %s... %d (%s)\n",
-					fds[i].fd == audio_fd ? "audio" : "video",
-					fds[i].revents & POLLERR ? "POLLERR" : "POLLHUP", errno, g_strerror(errno));
-				if(fds[i].fd == audio_fd) {
-					close(audio_fd);
-					audio_fd = -1;
-				} else {
-					close(video_fd);
-					video_fd = -1;
-				}
-				continue;
-			} else if(fds[i].revents & POLLIN) {
-				/* Got an RTP packet */
-				addrlen = sizeof(remote);
-				bytes = recvfrom(fds[i].fd, buffer, 1500, 0, (struct sockaddr *)&remote, &addrlen);
-				if(bytes < 0 || !imquic_is_rtp(buffer, bytes)) {
-					/* Failed to read or not an RTP packet? */
+			num = 0;
+			if(audio_fd != -1) {
+				fds[num].fd = audio_fd;
+				fds[num].events = POLLIN;
+				fds[num].revents = 0;
+				num++;
+			}
+			if(video_fd != -1) {
+				fds[num].fd = video_fd;
+				fds[num].events = POLLIN;
+				fds[num].revents = 0;
+				num++;
+			}
+			if(num == 0)
+				break;
+			/* Wait for some data */
+			resfd = poll(fds, num, 100);
+			if(resfd < 0) {
+				if(errno == EINTR) {
+					IMQUIC_LOG(IMQUIC_LOG_HUGE, "Got an EINTR (%s), ignoring...\n", g_strerror(errno));
 					continue;
 				}
-				before = g_get_monotonic_time();
-				/* Pick the right flow ID */
-				flow_id = (fds[i].fd == audio_fd ? options.audio_flow : options.video_flow);
-				/* Send the RTP packet on all connections using the specified multiplexing mode */
-				GHashTableIter iter;
-				gpointer value;
-				imquic_mutex_lock(&mutex);
-				g_hash_table_iter_init(&iter, connections);
-				while(g_hash_table_iter_next(&iter, NULL, &value)) {
-					imquic_connection *roq_conn = (imquic_connection *)value;
-					sent = imquic_roq_send_rtp(roq_conn, multiplexing, flow_id, buffer, bytes, one_stream_per_packet);
-					if(sent == 0) {
-						IMQUIC_LOG(IMQUIC_LOG_WARN, "[%s] Couldn't send RTP packet...\n",
-							imquic_get_connection_name(roq_conn));
-					} else if(!options.quiet) {
-						imquic_rtp_header *rtp = (imquic_rtp_header *)buffer;
-						IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s]  -- [%s][flow=%"SCNu64"][%d] ssrc=%"SCNu32", pt=%"SCNu16", seq=%"SCNu16", ts=%"SCNu32"\n",
-							imquic_get_connection_name(roq_conn),
-							mode, flow_id, bytes,
-							ntohl(rtp->ssrc), rtp->type, ntohs(rtp->seq_number), ntohl(rtp->timestamp));
+				IMQUIC_LOG(IMQUIC_LOG_ERR, "Error polling... %d (%s)\n", errno, g_strerror(errno));
+				break;
+			}
+			for(i=0; i<num; i++) {
+				if(fds[i].revents & (POLLERR | POLLHUP)) {
+					/* Socket error? */
+					IMQUIC_LOG(IMQUIC_LOG_ERR, "Error polling %s RTP socket: %s... %d (%s)\n",
+						fds[i].fd == audio_fd ? "audio" : "video",
+						fds[i].revents & POLLERR ? "POLLERR" : "POLLHUP", errno, g_strerror(errno));
+					if(fds[i].fd == audio_fd) {
+						close(audio_fd);
+						audio_fd = -1;
+					} else {
+						close(video_fd);
+						video_fd = -1;
 					}
+					continue;
+				} else if(fds[i].revents & POLLIN) {
+					/* Got an RTP packet */
+					addrlen = sizeof(remote);
+					bytes = recvfrom(fds[i].fd, buffer, 1500, 0, (struct sockaddr *)&remote, &addrlen);
+					if(bytes < 0 || !imquic_roq_is_rtp(buffer, bytes)) {
+						/* Failed to read or not an RTP packet? */
+						continue;
+					}
+					before = g_get_monotonic_time();
+					/* Pick the right flow ID */
+					flow_id = (fds[i].fd == audio_fd ? options.audio_flow : options.video_flow);
+					imquic_demo_send_rtp_to_connections(flow_id, buffer, bytes);
 				}
-				imquic_mutex_unlock(&mutex);
 			}
 		}
 	}
@@ -461,6 +556,10 @@ int main(int argc, char *argv[]) {
 	imquic_shutdown_endpoint(endpoint);
 
 done:
+#ifdef HAVE_ROQ_CAPTURE
+	if(options.capture)
+		roq_capture_destroy();
+#endif
 	if(audio_fd > -1)
 		close(audio_fd);
 	if(video_fd > -1)
