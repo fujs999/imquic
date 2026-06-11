@@ -73,6 +73,10 @@ typedef struct imquic_configuration {
 	uint32_t moq_version;
 	/*! \brief Whether we should add GREASE to our SETUP options */
 	gboolean moq_grease;
+	/*! \brief Congestion control algorithm to use (e.g., bbr, cubic, prague) */
+	const char *cc_algo;
+	/*! \brief Optional congestion control algorithm options string */
+	const char *cc_algo_option;
 	/*! \brief Optional user data, to pass back when notifying new connections associated to this endpoint */
 	void *user_data;
 } imquic_configuration;

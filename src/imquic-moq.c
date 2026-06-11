@@ -90,6 +90,10 @@ imquic_server *imquic_create_moq_server(const char *name, ...) {
 			config.moq_version = va_arg(args, int);
 		} else if(property == IMQUIC_CONFIG_MOQ_GREASE) {
 			config.moq_grease = va_arg(args, gboolean);
+		} else if(property == IMQUIC_CONFIG_CC_ALGO) {
+			config.cc_algo = va_arg(args, char *);
+		} else if(property == IMQUIC_CONFIG_CC_OPTION) {
+			config.cc_algo_option = va_arg(args, char *);
 		} else if(property == IMQUIC_CONFIG_USER_DATA) {
 			config.user_data = va_arg(args, void *);
 		} else {
@@ -196,6 +200,10 @@ imquic_client *imquic_create_moq_client(const char *name, ...) {
 			config.moq_version = va_arg(args, int);
 		} else if(property == IMQUIC_CONFIG_MOQ_GREASE) {
 			config.moq_grease = va_arg(args, gboolean);
+		} else if(property == IMQUIC_CONFIG_CC_ALGO) {
+			config.cc_algo = va_arg(args, char *);
+		} else if(property == IMQUIC_CONFIG_CC_OPTION) {
+			config.cc_algo_option = va_arg(args, char *);
 		} else if(property == IMQUIC_CONFIG_USER_DATA) {
 			config.user_data = va_arg(args, void *);
 		} else {

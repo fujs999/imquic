@@ -1517,6 +1517,8 @@ int main(int argc, char *argv[]) {
 		IMQUIC_CONFIG_QLOG_SEQUENTIAL, options.qlog_sequential,
 		IMQUIC_CONFIG_MOQ_VERSION, moq_version,
 		IMQUIC_CONFIG_MOQ_GREASE, options.test_grease,
+		IMQUIC_CONFIG_CC_ALGO, options.cc_algo,
+		IMQUIC_CONFIG_CC_OPTION, options.cc_algo_option,
 		IMQUIC_CONFIG_DONE, NULL);
 	if(client == NULL) {
 		ret = 1;

@@ -326,6 +326,13 @@ typedef enum imquic_config {
 	IMQUIC_CONFIG_MOQ_VERSION,
 	/*! \brief Whether MoQ SETUP messages should include GREASE options (ignored before v17) */
 	IMQUIC_CONFIG_MOQ_GREASE,
+	/*! \brief Congestion control algorithm to use (string, e.g., bbr, cubic, dcubic, prague, newreno)
+	 * \note When not set, picoquic defaults to BBR. Supported values depend on the
+	 * linked picoquic version (typically bbr, bbr1, cubic, dcubic, fastcc, newreno, prague, c4) */
+	IMQUIC_CONFIG_CC_ALGO,
+	/*! \brief Optional congestion control algorithm options string (string)
+	 * \note Algorithm-specific options passed to picoquic (e.g., BBR tuning via --cco in picoquicdemo) */
+	IMQUIC_CONFIG_CC_OPTION,
 	/*! \brief Generic user data, if any (void pointer) */
 	IMQUIC_CONFIG_USER_DATA,
 	/*! \brief Must be the last property, followed by NULL */

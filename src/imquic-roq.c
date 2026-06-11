@@ -90,6 +90,10 @@ imquic_server *imquic_create_roq_server(const char *name, ...) {
 		} else if(property == IMQUIC_CONFIG_MOQ_GREASE) {
 			IMQUIC_LOG(IMQUIC_LOG_WARN, "%s is ignored when creating RoQ endpoints\n", imquic_config_str(property));
 			va_arg(args, gboolean);
+		} else if(property == IMQUIC_CONFIG_CC_ALGO) {
+			config.cc_algo = va_arg(args, char *);
+		} else if(property == IMQUIC_CONFIG_CC_OPTION) {
+			config.cc_algo_option = va_arg(args, char *);
 		} else if(property == IMQUIC_CONFIG_USER_DATA) {
 			config.user_data = va_arg(args, void *);
 		} else {
@@ -193,6 +197,10 @@ imquic_client *imquic_create_roq_client(const char *name, ...) {
 		} else if(property == IMQUIC_CONFIG_MOQ_GREASE) {
 			IMQUIC_LOG(IMQUIC_LOG_WARN, "%s is ignored when creating RoQ endpoints\n", imquic_config_str(property));
 			va_arg(args, gboolean);
+		} else if(property == IMQUIC_CONFIG_CC_ALGO) {
+			config.cc_algo = va_arg(args, char *);
+		} else if(property == IMQUIC_CONFIG_CC_OPTION) {
+			config.cc_algo_option = va_arg(args, char *);
 		} else if(property == IMQUIC_CONFIG_USER_DATA) {
 			config.user_data = va_arg(args, void *);
 		} else {

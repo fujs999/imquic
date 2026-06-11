@@ -132,7 +132,10 @@ int imquic_quic_create_context(imquic_network_endpoint *endpoint, imquic_configu
 	}
 	/* We always enable this: if the env variable isn't set it will be ignored */
 	piconfig.enable_sslkeylog = 1;
-	/* FIXME Enrich configuration */
+	if(config->cc_algo != NULL)
+		piconfig.cc_algo_id = config->cc_algo;
+	if(config->cc_algo_option != NULL)
+		piconfig.cc_algo_option_string = config->cc_algo_option;
 	uint64_t current_time = picoquic_current_time();
 	endpoint->qc = picoquic_create_and_configure(&piconfig,
 		imquic_quic_stream_callback, endpoint, current_time, NULL);

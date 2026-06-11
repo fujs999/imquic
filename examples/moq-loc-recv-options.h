@@ -39,6 +39,8 @@ typedef struct demo_options {
 	const char *cert_key;
 	const char *ticket_file;
 	const char *secrets_log;
+	char *cc_algo;
+	char *cc_algo_option;
 	const char *qlog_path;
 	const char **qlog_logging;
 	gboolean qlog_sequential;
