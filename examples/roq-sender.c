@@ -542,6 +542,8 @@ int main(int argc, char *argv[]) {
 			IMQUIC_CONFIG_QLOG_ROQ, qlog_roq,
 			IMQUIC_CONFIG_QLOG_ROQ_PACKETS, options.qlog_roq_packets,
 			IMQUIC_CONFIG_QLOG_SEQUENTIAL, options.qlog_sequential,
+			IMQUIC_CONFIG_CC_ALGO, options.cc_algo,
+			IMQUIC_CONFIG_CC_OPTION, options.cc_algo_option,
 			IMQUIC_CONFIG_DONE, NULL);
 	} else {
 		endpoint = imquic_create_roq_server("roq-sender-server",
@@ -560,6 +562,8 @@ int main(int argc, char *argv[]) {
 			IMQUIC_CONFIG_QLOG_ROQ_PACKETS, options.qlog_roq_packets,
 			IMQUIC_CONFIG_QLOG_SEQUENTIAL, options.qlog_sequential,
 			IMQUIC_CONFIG_EARLY_DATA, (options.ticket_file != NULL),
+			IMQUIC_CONFIG_CC_ALGO, options.cc_algo,
+			IMQUIC_CONFIG_CC_OPTION, options.cc_algo_option,
 			IMQUIC_CONFIG_DONE, NULL);
 	}
 	if(endpoint == NULL) {
