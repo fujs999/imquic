@@ -97,6 +97,8 @@ static const char *imquic_demo_sdl_audioformat_str(SDL_AudioFormat format) {
 static imquic_moq_catalog *catalog = NULL;
 static OpusDecoder *audiodec = NULL;
 static AVCodecContext *videodec_ctx = NULL;
+static uint8_t *video_extradata_cache = NULL;
+static size_t video_extradata_cache_size = 0;
 static imquic_demo_video_codec codec = DEMO_H264_AVCC;
 static AVCodec *video_codec = NULL;
 static gboolean got_keyframe = FALSE;
@@ -292,10 +294,53 @@ static void imquic_demo_destroy_audio_decoder(void) {
 	audiodec = NULL;
 }
 
+static void imquic_demo_clear_video_extradata_cache(void) {
+	g_free(video_extradata_cache);
+	video_extradata_cache = NULL;
+	video_extradata_cache_size = 0;
+}
+
+static gboolean imquic_demo_video_extradata_changed(const uint8_t *extradata, size_t extradata_size) {
+	if(extradata == NULL || extradata_size == 0)
+		return video_extradata_cache != NULL;
+	if(video_extradata_cache == NULL || video_extradata_cache_size != extradata_size)
+		return TRUE;
+	return memcmp(video_extradata_cache, extradata, extradata_size) != 0;
+}
+
+static void imquic_demo_set_video_extradata_cache(const uint8_t *extradata, size_t extradata_size) {
+	imquic_demo_clear_video_extradata_cache();
+	if(extradata != NULL && extradata_size > 0) {
+		video_extradata_cache = g_malloc(extradata_size);
+		memcpy(video_extradata_cache, extradata, extradata_size);
+		video_extradata_cache_size = extradata_size;
+	}
+}
+
 static void imquic_demo_destroy_video_decoder(void) {
 	if(videodec_ctx != NULL)
 		avcodec_free_context(&videodec_ctx);
 	videodec_ctx = NULL;
+	imquic_demo_clear_video_extradata_cache();
+}
+
+static int imquic_demo_ensure_video_decoder(struct imquic_moq_property_data *loc_extradata, gboolean keyframe) {
+	uint8_t *extradata = loc_extradata ? loc_extradata->buffer : NULL;
+	size_t extradata_size = loc_extradata ? loc_extradata->length : 0;
+
+	if(loc_extradata != NULL && imquic_demo_video_extradata_changed(extradata, extradata_size)) {
+		if(videodec_ctx != NULL) {
+			IMQUIC_LOG(IMQUIC_LOG_VERB, "Video extradata changed, recreating decoder\n");
+			imquic_demo_destroy_video_decoder();
+		}
+	}
+	if(videodec_ctx == NULL && (keyframe || codec == DEMO_AV1)) {
+		if(imquic_demo_create_video_decoder(extradata, extradata_size) < 0)
+			return -1;
+		if(loc_extradata != NULL)
+			imquic_demo_set_video_extradata_cache(extradata, extradata_size);
+	}
+	return 0;
 }
 
 /* Video buffer catch-up */
@@ -325,12 +370,6 @@ static void imquic_demo_process_video_buffer(void) {
 			}
 			props = props->next;
 		}
-		/* Decode video */
-		if(loc_extradata != NULL) {
-			/* Use the extradata to (re)create the video decoder context */
-			if(videodec_ctx != NULL)
-				imquic_demo_destroy_video_decoder();
-		}
 		gboolean keyframe = (loc_extradata != NULL);
 		if(!keyframe) {
 			if(codec == DEMO_H264_ANNEXB)
@@ -342,13 +381,9 @@ static void imquic_demo_process_video_buffer(void) {
 			if(codec == DEMO_AV1)
 				keyframe = imquic_demo_av1_is_keyframe(object->payload, object->payload_len);
 		}
-		if(videodec_ctx == NULL && (keyframe || codec == DEMO_AV1)) {
-			if(imquic_demo_create_video_decoder(loc_extradata ? loc_extradata->buffer : NULL,
-					loc_extradata ? loc_extradata->length : 0) < -1) {
-				/* Stop here */
-				g_atomic_int_inc(&stop);
-				return;
-			}
+		if(imquic_demo_ensure_video_decoder(loc_extradata, keyframe) < 0) {
+			g_atomic_int_inc(&stop);
+			return;
 		}
 		gboolean render = (temp->next == NULL);
 		imquic_demo_decode_video(object->payload, object->payload_len, keyframe, render);
@@ -799,12 +834,6 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 				video_buffer = g_list_prepend(video_buffer, imquic_moq_object_duplicate(object));
 				return;
 			}
-			/* Decode video */
-			if(loc_extradata != NULL) {
-				/* Use the extradata to (re)create the video decoder context */
-				if(videodec_ctx != NULL)
-					imquic_demo_destroy_video_decoder();
-			}
 			/* Check if it's a keyframe, looking in the payload if needed */
 			gboolean keyframe = (loc_extradata != NULL);
 			if(!keyframe) {
@@ -817,13 +846,9 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 				if(codec == DEMO_AV1)
 					keyframe = imquic_demo_av1_is_keyframe(object->payload, object->payload_len);
 			}
-			if(videodec_ctx == NULL && (keyframe || codec == DEMO_AV1)) {
-				if(imquic_demo_create_video_decoder(loc_extradata ? loc_extradata->buffer : NULL,
-						loc_extradata ? loc_extradata->length : 0) < -1) {
-					/* Stop here */
-					g_atomic_int_inc(&stop);
-					return;
-				}
+			if(imquic_demo_ensure_video_decoder(loc_extradata, keyframe) < 0) {
+				g_atomic_int_inc(&stop);
+				return;
 			}
 			gboolean render = (object->delivery != IMQUIC_MOQ_USE_FETCH);
 			if(render && timescale > 0)
