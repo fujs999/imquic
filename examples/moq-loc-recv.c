@@ -105,7 +105,8 @@ static imquic_mutex mutex = IMQUIC_MUTEX_INITIALIZER;
 
 /* Video info overlay */
 #define IMQUIC_DEMO_FONT_SIZE 15
-#define IMQUIC_DEMO_OVERLAY_MAX_LINES 4
+#define IMQUIC_DEMO_OVERLAY_MAX_LINES 12
+#define IMQUIC_DEMO_AUDIO_RATE 48000
 static TTF_Font *overlay_font = NULL;
 static gboolean overlay_font_inited = FALSE;
 static char video_codec_str[64] = { 0 };
@@ -117,6 +118,32 @@ static uint32_t video_frames_window = 0;
 static double video_measured_fps = 0;
 static double video_measured_bitrate = 0;
 static uint32_t video_stats_last_tick = 0;
+
+typedef struct imquic_demo_video_object_stats {
+	gboolean initialized;
+	uint64_t last_group_id;
+	uint64_t last_object_id;
+	uint64_t last_media_ts;
+	uint64_t last_timescale;
+	int64_t last_arrival_us;
+	int64_t stream_origin_arrival_us;
+	uint64_t stream_origin_media_ts;
+	double jitter_ms;
+	uint32_t objects_received_window;
+	uint32_t objects_lost_window;
+} imquic_demo_video_object_stats;
+
+static imquic_demo_video_object_stats video_object_stats = { 0 };
+static imquic_mutex stats_mutex = IMQUIC_MUTEX_INITIALIZER;
+static imquic_connection *stats_conn = NULL;
+static uint32_t objects_lost_display = 0;
+static uint32_t objects_recv_display = 0;
+static double object_loss_rate_display = 0;
+static double media_jitter_display_ms = 0;
+static double stream_delay_display_ms = 0;
+static double quic_rtt_display_ms = 0;
+static double quic_jitter_display_ms = 0;
+static double playout_delay_display_ms = 0;
 
 static int imquic_demo_create_audio_decoder(void) {
 	if(audio_tn == NULL)
@@ -332,10 +359,83 @@ static void imquic_demo_process_video_buffer(void) {
 }
 
 /* imquic callbacks */
+static void imquic_demo_set_stats_conn(imquic_connection *conn) {
+	if(conn == NULL)
+		return;
+	imquic_mutex_lock(&stats_mutex);
+	if(stats_conn != conn) {
+		if(stats_conn != NULL)
+			imquic_connection_unref(stats_conn);
+		stats_conn = conn;
+		imquic_connection_ref(stats_conn);
+	}
+	imquic_mutex_unlock(&stats_mutex);
+}
+
+static void imquic_demo_track_video_object(uint64_t group_id, uint64_t object_id,
+		uint64_t timestamp, uint64_t timescale) {
+	int64_t now_us = g_get_monotonic_time();
+	uint64_t ts_scale = timescale > 0 ? timescale : (uint64_t)G_USEC_PER_SEC;
+
+	imquic_mutex_lock(&stats_mutex);
+	if(!video_object_stats.initialized) {
+		video_object_stats.last_group_id = group_id;
+		video_object_stats.last_object_id = object_id;
+		video_object_stats.last_media_ts = timestamp;
+		video_object_stats.last_timescale = ts_scale;
+		video_object_stats.last_arrival_us = now_us;
+		video_object_stats.stream_origin_arrival_us = now_us;
+		video_object_stats.stream_origin_media_ts = timestamp;
+		video_object_stats.initialized = TRUE;
+	} else {
+		if(group_id == video_object_stats.last_group_id) {
+			if(object_id > video_object_stats.last_object_id) {
+				uint64_t gap = object_id - video_object_stats.last_object_id - 1;
+				if(gap > 0)
+					video_object_stats.objects_lost_window += (uint32_t)gap;
+				video_object_stats.last_object_id = object_id;
+			}
+		} else if(group_id > video_object_stats.last_group_id) {
+			video_object_stats.last_group_id = group_id;
+			video_object_stats.last_object_id = object_id;
+		}
+		if(video_object_stats.last_arrival_us > 0) {
+			double transit_ms = (double)(now_us - video_object_stats.last_arrival_us) / 1000.0;
+			int64_t ts_diff = (int64_t)(timestamp - video_object_stats.last_media_ts);
+			double media_ms = (double)ts_diff * 1000.0 / (double)video_object_stats.last_timescale;
+			double d = transit_ms - media_ms;
+			if(d < 0.0)
+				d = -d;
+			video_object_stats.jitter_ms += (d - video_object_stats.jitter_ms) / 16.0;
+		}
+		video_object_stats.last_media_ts = timestamp;
+		video_object_stats.last_timescale = ts_scale;
+		video_object_stats.last_arrival_us = now_us;
+	}
+	video_object_stats.objects_received_window++;
+	if(ts_scale > 0) {
+		int64_t media_elapsed_us = (int64_t)(timestamp - video_object_stats.stream_origin_media_ts) *
+			(int64_t)G_USEC_PER_SEC / (int64_t)ts_scale;
+		int64_t expected_arrival_us = video_object_stats.stream_origin_arrival_us + media_elapsed_us;
+		stream_delay_display_ms = (double)(now_us - expected_arrival_us) / 1000.0;
+	}
+	imquic_mutex_unlock(&stats_mutex);
+}
+
+static double imquic_demo_audio_playout_delay_ms(void) {
+	Uint32 queued = 0;
+
+	if(dev == 0)
+		return 0.0;
+	queued = SDL_GetQueuedAudioSize(dev);
+	return (double)queued * 1000.0 / (double)(IMQUIC_DEMO_AUDIO_RATE * 2);
+}
+
 static void imquic_demo_new_connection(imquic_connection *conn, void *user_data) {
 	/* Got new connection */
 	imquic_connection_ref(conn);
 	moq_conn = conn;
+	imquic_demo_set_stats_conn(conn);
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] New MoQ connection (configuring parameters)\n", imquic_get_connection_name(conn));
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s]   -- %s (%s)\n", imquic_get_connection_name(conn),
 		imquic_is_connection_webtransport(conn) ? "WebTransport" : "Raw QUIC",
@@ -726,6 +826,8 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 				}
 			}
 			gboolean render = (object->delivery != IMQUIC_MOQ_USE_FETCH);
+			if(render && timescale > 0)
+				imquic_demo_track_video_object(object->group_id, object->object_id, timestamp, timescale);
 			imquic_demo_decode_video(object->payload, object->payload_len, keyframe, render);
 		}
 	}
@@ -762,6 +864,12 @@ static void imquic_demo_connection_failed(void *user_data) {
 static void imquic_demo_connection_gone(imquic_connection *conn, uint64_t error_code, const char *reason) {
 	/* Connection was closed */
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] MoQ connection gone\n", imquic_get_connection_name(conn));
+	imquic_mutex_lock(&stats_mutex);
+	if(stats_conn == conn) {
+		imquic_connection_unref(stats_conn);
+		stats_conn = NULL;
+	}
+	imquic_mutex_unlock(&stats_mutex);
 	if(conn == moq_conn)
 		imquic_connection_unref(conn);
 	moq_conn = NULL;
@@ -821,6 +929,8 @@ static void imquic_demo_destroy_overlay_font(void) {
 
 static void imquic_demo_update_video_stats(uint32_t ticks) {
 	uint32_t elapsed = 0;
+	imquic_path_quality pq = { 0 };
+
 	if(video_stats_last_tick == 0) {
 		video_stats_last_tick = ticks;
 		return;
@@ -834,6 +944,26 @@ static void imquic_demo_update_video_stats(uint32_t ticks) {
 	video_bytes_window = 0;
 	video_frames_window = 0;
 	imquic_mutex_unlock(&mutex);
+
+	imquic_mutex_lock(&stats_mutex);
+	objects_lost_display = video_object_stats.objects_lost_window;
+	objects_recv_display = video_object_stats.objects_received_window;
+	if(objects_recv_display + objects_lost_display > 0)
+		object_loss_rate_display = 100.0 * (double)objects_lost_display /
+			(double)(objects_recv_display + objects_lost_display);
+	else
+		object_loss_rate_display = 0.0;
+	media_jitter_display_ms = video_object_stats.jitter_ms;
+	video_object_stats.objects_lost_window = 0;
+	video_object_stats.objects_received_window = 0;
+
+	if(stats_conn != NULL && imquic_get_connection_path_quality(stats_conn, &pq) == 0) {
+		quic_rtt_display_ms = (double)pq.rtt_us / 1000.0;
+		quic_jitter_display_ms = (double)pq.rtt_jitter_us / 1000.0;
+	}
+	imquic_mutex_unlock(&stats_mutex);
+
+	playout_delay_display_ms = imquic_demo_audio_playout_delay_ms();
 	video_stats_last_tick = ticks;
 }
 
@@ -868,6 +998,10 @@ static void imquic_demo_render_video_overlay(SDL_Renderer *r) {
 	int x = 10, y = 10, line_h = 0, max_w = 0, total_h = 0;
 	int width = 0, height = 0, line_count = 0, i = 0, lw = 0, lh = 0;
 	double fps = 0, bitrate = 0;
+	uint32_t obj_lost = 0, obj_recv = 0;
+	double obj_loss = 0, media_jitter = 0, stream_delay = 0;
+	double quic_rtt = 0, quic_jitter = 0;
+	double playout = 0;
 
 	if(overlay_font == NULL)
 		return;
@@ -880,6 +1014,16 @@ static void imquic_demo_render_video_overlay(SDL_Renderer *r) {
 	fps = video_measured_fps;
 	bitrate = video_measured_bitrate;
 	imquic_mutex_unlock(&mutex);
+	imquic_mutex_lock(&stats_mutex);
+	obj_lost = objects_lost_display;
+	obj_recv = objects_recv_display;
+	obj_loss = object_loss_rate_display;
+	media_jitter = media_jitter_display_ms;
+	stream_delay = stream_delay_display_ms;
+	quic_rtt = quic_rtt_display_ms;
+	quic_jitter = quic_jitter_display_ms;
+	imquic_mutex_unlock(&stats_mutex);
+	playout = playout_delay_display_ms;
 	if(width <= 0 && video_catalog_width > 0)
 		width = video_catalog_width;
 	if(height <= 0 && video_catalog_height > 0)
@@ -913,6 +1057,37 @@ static void imquic_demo_render_video_overlay(SDL_Renderer *r) {
 	} else if(video_catalog_bitrate > 0) {
 		imquic_demo_format_bitrate(bitrate_str, sizeof(bitrate_str), (double)video_catalog_bitrate);
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Bitrate: %s", bitrate_str);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
+	if(obj_recv > 0 || obj_lost > 0) {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]),
+			"Object loss: %"G_GUINT32_FORMAT" (%.1f%%)", obj_lost, obj_loss);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
+	if(media_jitter > 0.0) {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Media jitter: %.1f ms", media_jitter);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
+	if(stream_delay > 0.0) {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Stream delay: %.0f ms", stream_delay);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
+	if(quic_rtt > 0.0) {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "RTT: %.1f ms", quic_rtt);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
+	if(quic_jitter > 0.0) {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "QUIC jitter: %.1f ms", quic_jitter);
+		lines[line_count] = line_bufs[line_count];
+		line_count++;
+	}
+	if(playout > 0.0) {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Playout delay: %.0f ms", playout);
 		lines[line_count] = line_bufs[line_count];
 		line_count++;
 	}
