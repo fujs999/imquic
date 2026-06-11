@@ -204,7 +204,11 @@ imquic_roq_sender_SOURCES += \
 	roq-capture.c \
 	roq-capture.h \
 	moq-loc-abr.c \
-	moq-loc-abr.h
+	moq-loc-abr.h \
+	moq-loc-svc.c \
+	moq-loc-svc.h \
+	moq-utils.c \
+	moq-utils.h
 imquic_roq_sender_CFLAGS += \
 	$(ROQAV_CFLAGS) \
 	-DHAVE_ROQ_CAPTURE
@@ -215,7 +219,11 @@ imquic_roq_receiver_SOURCES += \
 	roq-display.c \
 	roq-display.h \
 	roq-utils.c \
-	roq-utils.h
+	roq-utils.h \
+	moq-loc-svc.c \
+	moq-loc-svc.h \
+	moq-utils.c \
+	moq-utils.h
 imquic_roq_receiver_CFLAGS += \
 	$(ROQAV_CFLAGS) \
 	-DHAVE_ROQ_DISPLAY

@@ -41,6 +41,10 @@ typedef struct demo_options {
 	int audio_pt;
 	int64_t video_flow;
 	int video_pt;
+	const char *video_codec;
+	int svc_max_temporal_layer;
+	int svc_max_spatial_layer;
+	gboolean no_svc_adaptive;
 	int window_width;
 	int window_height;
 	gboolean debug_ffmpeg;

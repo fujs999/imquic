@@ -15,10 +15,16 @@
 
 #include <imquic/imquic.h>
 
+#include "moq-utils.h"
+
 typedef struct roq_display_config {
 	gboolean play_video;
 	int64_t video_flow;
 	uint8_t video_pt;
+	imquic_demo_video_codec video_codec;
+	int svc_max_temporal_layer;
+	int svc_max_spatial_layer;
+	gboolean no_svc_adaptive;
 	gboolean play_audio;
 	int64_t audio_flow;
 	uint8_t audio_pt;

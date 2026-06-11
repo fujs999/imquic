@@ -16,6 +16,7 @@
 #include "roq-receiver-options.h"
 #ifdef HAVE_ROQ_DISPLAY
 #include "roq-display.h"
+#include "moq-utils.h"
 #endif
 
 /* Command line options */
@@ -236,8 +237,17 @@ int main(int argc, char *argv[]) {
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "Echo mode (will send incoming RTP packets back to the client)\n");
 #ifdef HAVE_ROQ_DISPLAY
 	if(options.display) {
+		imquic_demo_video_codec video_codec = DEMO_H264_ANNEXB;
 		if(options.audio_pt < 0 || options.audio_pt > 127 || options.video_pt < 0 || options.video_pt > 127) {
 			IMQUIC_LOG(IMQUIC_LOG_FATAL, "Invalid audio/video payload type\n");
+			ret = 1;
+			goto done;
+		}
+		if(options.video_codec == NULL)
+			options.video_codec = "h264-annexb";
+		video_codec = imquic_demo_video_codec_from_str(options.video_codec);
+		if(video_codec == DEMO_UNKOWN) {
+			IMQUIC_LOG(IMQUIC_LOG_FATAL, "Unsupported video codec '%s'\n", options.video_codec);
 			ret = 1;
 			goto done;
 		}
@@ -245,6 +255,10 @@ int main(int argc, char *argv[]) {
 			.play_video = TRUE,
 			.video_flow = options.video_flow,
 			.video_pt = (uint8_t)options.video_pt,
+			.video_codec = video_codec,
+			.svc_max_temporal_layer = options.svc_max_temporal_layer,
+			.svc_max_spatial_layer = options.svc_max_spatial_layer,
+			.no_svc_adaptive = options.no_svc_adaptive,
 			.play_audio = !options.no_audio,
 			.audio_flow = options.audio_flow,
 			.audio_pt = (uint8_t)options.audio_pt,

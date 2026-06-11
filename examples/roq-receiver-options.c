@@ -13,6 +13,8 @@
 static GOptionContext *opts = NULL;
 
 gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
+	options->svc_max_temporal_layer = -1;
+	options->svc_max_spatial_layer = -1;
 	/* Supported command-line arguments */
 	GOptionEntry opt_entries[] = {
 		{ "client", 'o', 0, G_OPTION_ARG_NONE, &options->client, "Act as a QUIC client, not as a server (default=server)", NULL },
@@ -40,7 +42,11 @@ gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
 		{ "audio-flow", 'A', 0, G_OPTION_ARG_INT64, &options->audio_flow, "When displaying, flow ID of the audio RTP stream (default=0)", "number" },
 		{ "audio-pt", 'P', 0, G_OPTION_ARG_INT, &options->audio_pt, "When displaying, RTP payload type for Opus audio (default=111)", "pt" },
 		{ "video-flow", 'V', 0, G_OPTION_ARG_INT64, &options->video_flow, "When displaying, flow ID of the video RTP stream (default=1)", "number" },
-		{ "video-pt", 'T', 0, G_OPTION_ARG_INT, &options->video_pt, "When displaying, RTP payload type for H.264 video (default=96)", "pt" },
+		{ "video-pt", 'T', 0, G_OPTION_ARG_INT, &options->video_pt, "When displaying, RTP payload type for video (default=96)", "pt" },
+		{ "video-codec", 'e', 0, G_OPTION_ARG_STRING, &options->video_codec, "When displaying, video codec to use (default=h264-annexb)", "h264-annexb|h264-svc|vp9|vp9-svc" },
+		{ "svc-max-temporal-layer", 0, 0, G_OPTION_ARG_INT, &options->svc_max_temporal_layer, "Maximum SVC temporal layer to decode (-1=all, default=-1)", "0-3" },
+		{ "svc-max-spatial-layer", 0, 0, G_OPTION_ARG_INT, &options->svc_max_spatial_layer, "Maximum SVC spatial layer to decode (-1=all, default=-1)", "0-2" },
+		{ "no-svc-adaptive", 0, 0, G_OPTION_ARG_NONE, &options->no_svc_adaptive, "Disable automatic SVC layer selection in weak networks (default=adaptive when --svc-max-temporal-layer is not set)", NULL },
 		{ "window-width", 'X', 0, G_OPTION_ARG_INT, &options->window_width, "When displaying, window width in pixels (default=1280)", "pixels" },
 		{ "window-height", 'Y', 0, G_OPTION_ARG_INT, &options->window_height, "When displaying, window height in pixels (default=720)", "pixels" },
 		{ "debug-ffmpeg", 'D', 0, G_OPTION_ARG_NONE, &options->debug_ffmpeg, "When displaying, verbosely debug FFmpeg (default=no)", NULL },

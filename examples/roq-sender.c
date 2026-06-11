@@ -21,6 +21,8 @@
 #ifdef HAVE_ROQ_CAPTURE
 #include "roq-capture.h"
 #include "moq-loc-abr.h"
+#include "moq-loc-svc.h"
+#include "moq-utils.h"
 #endif
 
 /* Command line options */
@@ -51,6 +53,8 @@ static imquic_mutex mutex = IMQUIC_MUTEX_INITIALIZER;
 #ifdef HAVE_ROQ_CAPTURE
 static imquic_mutex send_mutex = IMQUIC_MUTEX_INITIALIZER;
 static moq_loc_abr *abr = NULL;
+static moq_loc_svc_abr *svc_abr = NULL;
+static imquic_demo_video_codec video_codec = DEMO_H264_ANNEXB;
 static GThread *abr_thread = NULL;
 static uint64_t send_ok_count = 0, send_fail_count = 0, video_bytes_sent = 0;
 static int applied_audio_bitrate = 0;
@@ -132,7 +136,10 @@ static void *imquic_demo_abr_thread(void *user_data) {
 				fail = send_fail_count;
 				bytes = video_bytes_sent;
 				imquic_mutex_unlock(&send_mutex);
-				moq_loc_abr_update(abr, conn, ok, fail, bytes);
+				if(abr != NULL)
+					moq_loc_abr_update(abr, conn, ok, fail, bytes);
+				if(svc_abr != NULL)
+					moq_loc_svc_abr_update(svc_abr, conn, ok, fail, -1.0);
 			}
 		}
 		g_usleep(500000);
@@ -302,18 +309,28 @@ int main(int argc, char *argv[]) {
 			ret = 1;
 			goto done;
 		}
+		if(capture_video) {
+			if(options.video_codec == NULL)
+				options.video_codec = "h264-annexb";
+			video_codec = imquic_demo_video_codec_from_str(options.video_codec);
+			if(video_codec == DEMO_UNKOWN) {
+				IMQUIC_LOG(IMQUIC_LOG_FATAL, "Unsupported video codec '%s'\n", options.video_codec);
+				ret = 1;
+				goto done;
+			}
+		}
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "Capture mode enabled\n");
 		if(capture_audio) {
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Audio: flow ID %d, Opus at %d bps, PT=%d\n",
 				options.audio_flow, options.audio_bitrate, options.audio_pt);
 		}
 		if(capture_video) {
-			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Video: flow ID %d, %dx%d@%d, H.264 at %d bps, PT=%d\n",
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Video: flow ID %d, %dx%d@%d, %s at %d bps, PT=%d\n",
 				options.video_flow, options.width, options.height, options.video_framerate,
-				options.video_bitrate, options.video_pt);
+				imquic_demo_video_codec_str(video_codec), options.video_bitrate, options.video_pt);
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Video device '%s' (%s)\n", options.video_device, options.video_format);
 		}
-		if(capture_video && !options.no_adaptive) {
+		if(capture_video && !options.no_adaptive && !moq_loc_svc_is_svc_codec(video_codec)) {
 			abr = moq_loc_abr_create(options.width, options.height, options.video_framerate,
 				options.video_bitrate, options.audio_bitrate);
 			applied_audio_bitrate = options.audio_bitrate;
@@ -321,6 +338,10 @@ int main(int argc, char *argv[]) {
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Max quality: %dx%d@%d, %d bps video, %d bps audio\n",
 				options.width, options.height, options.video_framerate,
 				options.video_bitrate, applied_audio_bitrate);
+		} else if(capture_video && moq_loc_svc_is_svc_codec(video_codec) && !options.no_adaptive) {
+			int temporal_layers = options.svc_temporal_layers > 0 ? options.svc_temporal_layers : 2;
+			svc_abr = moq_loc_svc_abr_create(temporal_layers);
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive layer selection enabled (targets: RTT<=150ms, jitter<=50ms, loss<=50%%)\n");
 		}
 	} else
 #endif
@@ -448,6 +469,9 @@ int main(int argc, char *argv[]) {
 			.width = options.width,
 			.height = options.height,
 			.video_framerate = options.video_framerate,
+			.video_codec = video_codec,
+			.svc_temporal_layers = options.svc_temporal_layers,
+			.svc_spatial_layers = options.svc_spatial_layers,
 			.video_format = options.video_format,
 			.video_device = options.video_device,
 			.video_resolution = options.video_resolution,
@@ -460,7 +484,9 @@ int main(int argc, char *argv[]) {
 		}
 		if(abr != NULL)
 			roq_capture_set_abr(abr);
-		if(abr != NULL) {
+		if(svc_abr != NULL)
+			roq_capture_set_svc_abr(svc_abr);
+		if(abr != NULL || svc_abr != NULL) {
 			GError *error = NULL;
 			abr_thread = g_thread_try_new("roq-abr", &imquic_demo_abr_thread, NULL, &error);
 			if(error != NULL) {
@@ -640,6 +666,9 @@ done:
 	if(abr != NULL)
 		moq_loc_abr_destroy(abr);
 	abr = NULL;
+	if(svc_abr != NULL)
+		moq_loc_svc_abr_destroy(svc_abr);
+	svc_abr = NULL;
 	if(options.capture)
 		roq_capture_destroy();
 #endif

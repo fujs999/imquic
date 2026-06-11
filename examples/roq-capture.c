@@ -23,6 +23,7 @@
 
 #include "roq-capture.h"
 #include "moq-loc-abr.h"
+#include "moq-loc-svc.h"
 #include "roq-utils.h"
 
 #define ROQ_AUDIO_SAMPLE_RATE 48000
@@ -52,6 +53,9 @@ static AVFrame *latest_frame = NULL;
 static imquic_mutex frame_mutex = IMQUIC_MUTEX_INITIALIZER;
 
 static moq_loc_abr *abr = NULL;
+static moq_loc_svc_abr *svc_abr = NULL;
+static moq_loc_svc_config svc_cfg = { 0 };
+static imquic_demo_video_codec video_codec_id = DEMO_H264_ANNEXB;
 static int applied_enc_generation = 0, applied_audio_bitrate = 0;
 static int enc_target_width = 0, enc_target_height = 0, enc_target_fps = 0;
 static volatile int force_video_keyframe = 0;
@@ -65,6 +69,67 @@ static gboolean roq_capture_emit_rtp(uint8_t *rtp, size_t rtp_len, void *user_da
 	if(rtp_out_cb != NULL)
 		rtp_out_cb(flow_id, rtp, rtp_len, rtp_out_user_data);
 	return TRUE;
+}
+
+static gboolean roq_capture_encoder_option_available(AVCodecContext *ctx, const char *name) {
+	if(ctx == NULL || ctx->priv_data == NULL || name == NULL)
+		return FALSE;
+	return av_opt_find(ctx->priv_data, name, NULL, 0, AV_OPT_SEARCH_CHILDREN) != NULL;
+}
+
+static int roq_capture_build_vp9_ts_parameters(char *buf, size_t buflen, int temporal_layers, int total_bitrate_bps) {
+	char br[128], dec[64];
+	int total_kbps = 0, i = 0, br_len = 0, dec_len = 0;
+	if(buf == NULL || buflen == 0 || temporal_layers < 2)
+		return -1;
+	total_kbps = total_bitrate_bps / 1024;
+	if(total_kbps < temporal_layers)
+		total_kbps = temporal_layers;
+	br[0] = '\0';
+	dec[0] = '\0';
+	for(i = 0; i < temporal_layers; i++) {
+		int layer_br = total_kbps / (1 << (temporal_layers - 1 - i));
+		int dec_val = 1 << (temporal_layers - 1 - i);
+		br_len += g_snprintf(br + br_len, sizeof(br) - br_len, "%s%d", i ? "," : "", layer_br);
+		dec_len += g_snprintf(dec + dec_len, sizeof(dec) - dec_len, "%s%d", i ? "," : "", dec_val);
+	}
+	return g_snprintf(buf, buflen,
+		"ts_number_layers=%d:ts_target_bitrate=%s:ts_rate_decimator=%s:ts_layering_mode=3",
+		temporal_layers, br, dec);
+}
+
+static void roq_capture_configure_svc_encoder(AVCodecContext *ctx) {
+	char layers[8], ts_buf[256];
+	if(ctx == NULL || !svc_cfg.enabled)
+		return;
+	if(video_codec_id == DEMO_H264_SVC) {
+		av_opt_set(ctx->priv_data, "profile", "high", AV_OPT_SEARCH_CHILDREN);
+		av_opt_set_int(ctx->priv_data, "allow_skip_frames", 1, AV_OPT_SEARCH_CHILDREN);
+		g_snprintf(layers, sizeof(layers), "%d", svc_cfg.temporal_layers);
+		av_opt_set(ctx->priv_data, "slices", layers, AV_OPT_SEARCH_CHILDREN);
+	} else if(video_codec_id == DEMO_VP9_SVC) {
+		av_opt_set(ctx->priv_data, "lag-in-frames", "25", AV_OPT_SEARCH_CHILDREN);
+		av_opt_set_int(ctx->priv_data, "auto-alt-ref", 1, AV_OPT_SEARCH_CHILDREN);
+		av_opt_set(ctx->priv_data, "temporal-aq", "1", AV_OPT_SEARCH_CHILDREN);
+		if(roq_capture_encoder_option_available(ctx, "ts-parameters")) {
+			if(roq_capture_build_vp9_ts_parameters(ts_buf, sizeof(ts_buf),
+					svc_cfg.temporal_layers, (int)ctx->bit_rate) < 0 ||
+					av_opt_set(ctx->priv_data, "ts-parameters", ts_buf, AV_OPT_SEARCH_CHILDREN) < 0) {
+				IMQUIC_LOG(IMQUIC_LOG_WARN, "Failed to configure VP9 SVC via ts-parameters\n");
+			} else {
+				IMQUIC_LOG(IMQUIC_LOG_INFO, "VP9 SVC temporal scaling: %s\n", ts_buf);
+			}
+		} else if(roq_capture_encoder_option_available(ctx, "vp9-temporal-layers")) {
+			IMQUIC_LOG(IMQUIC_LOG_WARN,
+				"VP9 SVC: ts-parameters not available, falling back to legacy vp9-temporal-layers\n");
+			g_snprintf(layers, sizeof(layers), "%d", svc_cfg.temporal_layers);
+			if(av_opt_set(ctx->priv_data, "vp9-temporal-layers", layers, AV_OPT_SEARCH_CHILDREN) < 0)
+				IMQUIC_LOG(IMQUIC_LOG_WARN, "Failed to set vp9-temporal-layers for VP9 SVC\n");
+		} else {
+			IMQUIC_LOG(IMQUIC_LOG_WARN,
+				"VP9 SVC: libvpx-vp9 lacks ts-parameters and vp9-temporal-layers, temporal scalability disabled\n");
+		}
+	}
 }
 
 static int roq_capture_open_video_encoder(int width, int height, int fps, int bitrate) {
@@ -85,17 +150,40 @@ static int roq_capture_open_video_encoder(int width, int height, int fps, int bi
 	videoenc_ctx->framerate = (AVRational){ fps, 1 };
 	videoenc_ctx->gop_size = fps * 2;
 	videoenc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-	videoenc_ctx->profile = FF_PROFILE_H264_BASELINE;
-	videoenc_ctx->level = 41;
+	if(video_codec_id == DEMO_H264_ANNEXB || video_codec_id == DEMO_H264_AVCC || video_codec_id == DEMO_H264_SVC) {
+		videoenc_ctx->profile = (video_codec_id == DEMO_H264_SVC) ?
+			FF_PROFILE_H264_HIGH : FF_PROFILE_H264_BASELINE;
+		videoenc_ctx->level = 41;
+	}
 	{
 		char br[20];
 		g_snprintf(br, sizeof(br), "%"SCNi64, videoenc_ctx->bit_rate / 1024);
-		av_opt_set(videoenc_ctx->priv_data, "b", br, AV_OPT_SEARCH_CHILDREN);
-		av_opt_set(videoenc_ctx->priv_data, "crf", "23", AV_OPT_SEARCH_CHILDREN);
-		av_opt_set(videoenc_ctx->priv_data, "profile", "baseline", 0);
-		av_opt_set(videoenc_ctx->priv_data, "preset", "ultrafast", 0);
-		av_opt_set(videoenc_ctx->priv_data, "tune", "zerolatency", 0);
+		if(video_codec_id == DEMO_H264_ANNEXB || video_codec_id == DEMO_H264_AVCC || video_codec_id == DEMO_H264_SVC) {
+			av_opt_set(videoenc_ctx->priv_data, "b", br, AV_OPT_SEARCH_CHILDREN);
+			if(video_codec_id == DEMO_H264_SVC) {
+				av_opt_set(videoenc_ctx->priv_data, "preset", "ultrafast", 0);
+				av_opt_set(videoenc_ctx->priv_data, "tune", "zerolatency", 0);
+			} else {
+				av_opt_set(videoenc_ctx->priv_data, "crf", "23", AV_OPT_SEARCH_CHILDREN);
+				av_opt_set(videoenc_ctx->priv_data, "profile", "baseline", 0);
+				av_opt_set(videoenc_ctx->priv_data, "preset", "ultrafast", 0);
+				av_opt_set(videoenc_ctx->priv_data, "tune", "zerolatency", 0);
+			}
+		} else if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC) {
+			g_snprintf(br, sizeof(br), "%d", bitrate / 1024);
+			av_opt_set(videoenc_ctx->priv_data, "b", br, 0);
+			av_opt_set(videoenc_ctx->priv_data, "speed", "7", 0);
+			av_opt_set_double(videoenc_ctx->priv_data, "max-intra-rate", 300, 0);
+			av_opt_set(videoenc_ctx->priv_data, "quality", "realtime", 0);
+			if(video_codec_id == DEMO_VP9)
+				av_opt_set(videoenc_ctx->priv_data, "lag-in-frames", "0", 0);
+			av_opt_set(videoenc_ctx->priv_data, "tile-columns", "2", 0);
+			av_opt_set(videoenc_ctx->priv_data, "row-mt", "1", 0);
+			av_opt_set(videoenc_ctx->priv_data, "threads", "2", 0);
+		}
 	}
+	if(moq_loc_svc_is_svc_codec(video_codec_id))
+		roq_capture_configure_svc_encoder(videoenc_ctx);
 	if(avcodec_open2(videoenc_ctx, video_codec, NULL) < 0) {
 		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error opening video encoder\n");
 		avcodec_free_context(&videoenc_ctx);
@@ -130,7 +218,7 @@ static int roq_capture_apply_video_bitrate(int bitrate) {
 static void roq_capture_apply_abr_video_config(void) {
 	moq_loc_abr_config abr_cfg = { 0 };
 	int generation = 0;
-	if(abr == NULL)
+	if(abr == NULL || moq_loc_svc_is_svc_codec(video_codec_id))
 		return;
 	generation = moq_loc_abr_config_generation(abr);
 	if(generation == applied_enc_generation)
@@ -147,6 +235,10 @@ static void roq_capture_apply_abr_video_config(void) {
 
 void roq_capture_set_abr(moq_loc_abr *controller) {
 	abr = controller;
+}
+
+void roq_capture_set_svc_abr(moq_loc_svc_abr *controller) {
+	svc_abr = controller;
 }
 
 static int roq_capture_create_audio(void) {
@@ -268,10 +360,41 @@ int roq_capture_init(const roq_capture_config *config, roq_capture_rtp_cb cb, vo
 	}
 	if(cfg.capture_video) {
 		imquic_roq_rtp_state_init(&video_rtp, cfg.video_pt, (uint32_t)g_random_int());
-		video_codec = avcodec_find_encoder_by_name("libx264");
+		video_codec_id = cfg.video_codec;
+		if(video_codec_id == DEMO_UNKOWN)
+			video_codec_id = DEMO_H264_ANNEXB;
+		if(video_codec_id == DEMO_H264_ANNEXB || video_codec_id == DEMO_H264_AVCC) {
+			video_codec = avcodec_find_encoder_by_name("libx264");
+		} else if(video_codec_id == DEMO_H264_SVC) {
+			video_codec = avcodec_find_encoder_by_name("libopenh264");
+			if(video_codec == NULL) {
+				IMQUIC_LOG(IMQUIC_LOG_WARN, "libopenh264 not found, falling back to libx264 (non-SVC)\n");
+				video_codec = avcodec_find_encoder_by_name("libx264");
+				video_codec_id = DEMO_H264_ANNEXB;
+			}
+		} else if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC) {
+			video_codec = avcodec_find_encoder_by_name("libvpx-vp9");
+		}
 		if(video_codec == NULL) {
-			IMQUIC_LOG(IMQUIC_LOG_ERR, "Video codec 'libx264' not available in libavcodec\n");
+			IMQUIC_LOG(IMQUIC_LOG_ERR, "Video codec '%s' not available in libavcodec\n",
+				imquic_demo_video_codec_str(video_codec_id));
 			return -1;
+		}
+		if(moq_loc_svc_is_svc_codec(video_codec_id)) {
+			moq_loc_svc_config_init(&svc_cfg);
+			svc_cfg.enabled = TRUE;
+			svc_cfg.codec = video_codec_id;
+			if(cfg.svc_temporal_layers > 0)
+				svc_cfg.temporal_layers = cfg.svc_temporal_layers;
+			if(cfg.svc_spatial_layers > 0)
+				svc_cfg.spatial_layers = cfg.svc_spatial_layers;
+			svc_cfg.max_send_temporal_layer = svc_cfg.temporal_layers - 1;
+			if(!moq_loc_svc_config_validate(&svc_cfg)) {
+				IMQUIC_LOG(IMQUIC_LOG_ERR, "Invalid SVC configuration\n");
+				return -1;
+			}
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC enabled: %d temporal layer(s), %d spatial layer(s)\n",
+				svc_cfg.temporal_layers, svc_cfg.spatial_layers);
 		}
 		if(roq_capture_create_video() < 0)
 			return -1;
@@ -527,8 +650,33 @@ static void *roq_capture_video_enc_thread(void *user_data) {
 			IMQUIC_LOG(IMQUIC_LOG_ERR, "Error encoding video frame: %d (%s)\n", ret, av_err2str(ret));
 			continue;
 		}
-		imquic_roq_rtp_packetize_h264_annexb(&video_rtp, packet.data, (size_t)packet.size, target_fps,
-			roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
+		gboolean kf = (packet.flags & AV_PKT_FLAG_KEY);
+		moq_loc_svc_layer layer = { 0 };
+		gboolean svc = moq_loc_svc_is_svc_codec(video_codec_id);
+		if(svc) {
+			if(svc_abr != NULL)
+				svc_cfg.max_send_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
+			if(moq_loc_svc_parse_packet(video_codec_id, packet.data, (size_t)packet.size, FALSE, &layer) < 0) {
+				layer.temporal_id = 0;
+				layer.spatial_id = 0;
+				layer.is_keyframe = kf;
+			} else if(!layer.is_keyframe) {
+				layer.is_keyframe = kf;
+			}
+			if(layer.temporal_id > svc_cfg.max_send_temporal_layer) {
+				IMQUIC_LOG(IMQUIC_LOG_VERB, "Dropping SVC layer T%d (max=%d)\n",
+					layer.temporal_id, svc_cfg.max_send_temporal_layer);
+				av_packet_unref(&packet);
+				continue;
+			}
+		}
+		if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC) {
+			imquic_roq_rtp_packetize_vp9(&video_rtp, packet.data, (size_t)packet.size, target_fps, kf,
+				roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
+		} else {
+			imquic_roq_rtp_packetize_h264_annexb(&video_rtp, packet.data, (size_t)packet.size, target_fps,
+				roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
+		}
 		av_packet_unref(&packet);
 	}
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "Leaving video encoding thread\n");

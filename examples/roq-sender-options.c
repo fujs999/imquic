@@ -23,8 +23,11 @@ gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
 		{ "video-device", 'i', 0, G_OPTION_ARG_STRING, &options->video_device, "When capturing, video device to capture from (default=/dev/video0)", "device" },
 		{ "video-resolution", 'W', 0, G_OPTION_ARG_STRING, &options->video_resolution, "When capturing, video resolution to capture (default=640x480)", "resolution" },
 		{ "video-framerate", 'F', 0, G_OPTION_ARG_INT, &options->video_framerate, "When capturing, video framerate in frames per second (default=25)", "fps" },
+		{ "video-codec", 'e', 0, G_OPTION_ARG_STRING, &options->video_codec, "When capturing, video codec to use (default=h264-annexb)", "h264-annexb|h264-svc|vp9|vp9-svc" },
+		{ "svc-temporal-layers", 0, 0, G_OPTION_ARG_INT, &options->svc_temporal_layers, "Number of SVC temporal layers for h264-svc/vp9-svc (default=2, max=4)", "2-4" },
+		{ "svc-spatial-layers", 0, 0, G_OPTION_ARG_INT, &options->svc_spatial_layers, "Number of SVC spatial layers for h264-svc/vp9-svc (default=1, max=3)", "1-3" },
 		{ "audio-pt", 'P', 0, G_OPTION_ARG_INT, &options->audio_pt, "When capturing, RTP payload type for Opus audio (default=111)", "pt" },
-		{ "video-pt", 'T', 0, G_OPTION_ARG_INT, &options->video_pt, "When capturing, RTP payload type for H.264 video (default=96)", "pt" },
+		{ "video-pt", 'T', 0, G_OPTION_ARG_INT, &options->video_pt, "When capturing, RTP payload type for video (default=96)", "pt" },
 		{ "debug-ffmpeg", 'D', 0, G_OPTION_ARG_NONE, &options->debug_ffmpeg, "When capturing, verbosely debug FFmpeg (default=no)", NULL },
 #endif
 		{ "audio-port", 'a', 0, G_OPTION_ARG_INT, &options->audio_port, "Port to bind to for incoming audio RTP packets (default=none)", "port" },

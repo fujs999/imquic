@@ -160,3 +160,105 @@ gboolean imquic_roq_rtp_packetize_h264_annexb(imquic_roq_rtp_state *state,
 	}
 	return TRUE;
 }
+
+#define IMQUIC_ROQ_VP9_CLOCK 90000
+
+static size_t imquic_roq_vp9_descriptor_len(const uint8_t *payload, size_t payload_len) {
+	size_t offset = 1;
+	if(payload == NULL || payload_len < 1)
+		return 0;
+	if(payload[0] & 0x80) {
+		if(payload_len < 2)
+			return 0;
+		offset += (payload[1] & 0x80) ? 2 : 1;
+	}
+	if((payload[0] & 0x20) && !(payload[0] & 0x10))
+		offset += 1;
+	return offset <= payload_len ? offset : 0;
+}
+
+gboolean imquic_roq_rtp_packetize_vp9(imquic_roq_rtp_state *state,
+		const uint8_t *frame, size_t len, int fps, gboolean keyframe,
+		imquic_roq_rtp_packet_cb cb, void *user_data) {
+	uint8_t packet[IMQUIC_ROQ_RTP_MAX_PACKET], payload[IMQUIC_ROQ_RTP_MAX_PACKET];
+	size_t max_chunk = 0, offset = 0;
+	uint32_t ts_increment = 0;
+	uint8_t p_bit = 0;
+	if(state == NULL || frame == NULL || len == 0 || cb == NULL || fps <= 0)
+		return FALSE;
+	ts_increment = IMQUIC_ROQ_VP9_CLOCK / (uint32_t)fps;
+	p_bit = keyframe ? 0x00 : 0x40;
+	max_chunk = IMQUIC_ROQ_RTP_MAX_PACKET - 12 - 1;
+	if(len <= max_chunk) {
+		payload[0] = (uint8_t)(0x0C | p_bit);
+		memcpy(payload + 1, frame, len);
+		size_t plen = imquic_roq_rtp_build_packet(state, packet, sizeof(packet),
+			payload, len + 1, TRUE, ts_increment);
+		return plen > 0 && cb(packet, plen, user_data);
+	}
+	while(offset < len) {
+		size_t chunk = len - offset;
+		gboolean first = (offset == 0);
+		gboolean last = FALSE;
+		uint8_t desc = p_bit;
+		if(chunk > max_chunk)
+			chunk = max_chunk;
+		last = (offset + chunk >= len);
+		if(first)
+			desc |= 0x08;
+		if(last)
+			desc |= 0x04;
+		payload[0] = desc;
+		memcpy(payload + 1, frame + offset, chunk);
+		size_t plen = imquic_roq_rtp_build_packet(state, packet, sizeof(packet),
+			payload, chunk + 1, last, first ? ts_increment : 0);
+		if(plen == 0 || !cb(packet, plen, user_data))
+			return FALSE;
+		offset += chunk;
+	}
+	return TRUE;
+}
+
+void imquic_roq_vp9_depay_reset(imquic_roq_vp9_depay *depay) {
+	if(depay == NULL)
+		return;
+	if(depay->frame != NULL)
+		g_byte_array_set_size(depay->frame, 0);
+	depay->in_frame = FALSE;
+}
+
+gboolean imquic_roq_rtp_depay_vp9(imquic_roq_vp9_depay *depay,
+		const uint8_t *payload, size_t payload_len, uint16_t seq, uint32_t timestamp,
+		uint8_t **frame, size_t *frame_len) {
+	size_t hdr_len = 0, data_len = 0;
+	gboolean start = FALSE, end = FALSE;
+	if(depay == NULL || payload == NULL || payload_len == 0 || frame == NULL || frame_len == NULL)
+		return FALSE;
+	*frame = NULL;
+	*frame_len = 0;
+	if(depay->frame == NULL)
+		depay->frame = g_byte_array_new();
+	hdr_len = imquic_roq_vp9_descriptor_len(payload, payload_len);
+	if(hdr_len == 0 || hdr_len >= payload_len)
+		return FALSE;
+	start = (payload[0] & 0x08) != 0;
+	end = (payload[0] & 0x04) != 0;
+	if(depay->last_ts != timestamp) {
+		imquic_roq_vp9_depay_reset(depay);
+		depay->last_ts = timestamp;
+	} else if(depay->in_frame && (uint16_t)(depay->last_seq + 1) != seq) {
+		imquic_roq_vp9_depay_reset(depay);
+	}
+	depay->last_seq = seq;
+	if(start)
+		imquic_roq_vp9_depay_reset(depay);
+	data_len = payload_len - hdr_len;
+	g_byte_array_append(depay->frame, payload + hdr_len, (guint)data_len);
+	depay->in_frame = TRUE;
+	if(!end)
+		return FALSE;
+	*frame = depay->frame->data;
+	*frame_len = depay->frame->len;
+	depay->in_frame = FALSE;
+	return TRUE;
+}

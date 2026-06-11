@@ -30,6 +30,9 @@ typedef struct demo_options {
 	const char *video_format;
 	const char *video_device;
 	const char *video_resolution;
+	const char *video_codec;
+	int svc_temporal_layers;
+	int svc_spatial_layers;
 	const char *multiplexing;
 	int timeout;
 	gboolean client;
