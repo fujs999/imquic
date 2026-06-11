@@ -81,7 +81,6 @@ typedef struct roq_video_rtp_stats {
 static roq_video_rtp_stats video_rtp_stats = { 0 };
 static imquic_mutex stats_mutex = IMQUIC_MUTEX_INITIALIZER;
 static imquic_connection *stats_conn = NULL;
-static uint64_t path_prev_packets_sent = 0, path_prev_packets_lost = 0;
 
 static uint32_t rtp_packets_lost_display = 0;
 static uint32_t rtp_packets_recv_display = 0;
@@ -89,8 +88,6 @@ static double rtp_loss_rate_display = 0;
 static double rtp_jitter_display = 0;
 static double quic_rtt_display_ms = 0;
 static double quic_jitter_display_ms = 0;
-static uint64_t quic_packets_lost_display = 0;
-static double quic_loss_rate_display = 0;
 static double playout_delay_display_ms = 0;
 
 static const char *roq_display_font_paths[] = {
@@ -334,8 +331,6 @@ static void roq_display_set_stats_conn(imquic_connection *conn) {
 			imquic_connection_unref(stats_conn);
 		stats_conn = conn;
 		imquic_connection_ref(stats_conn);
-		path_prev_packets_sent = 0;
-		path_prev_packets_lost = 0;
 	}
 	imquic_mutex_unlock(&stats_mutex);
 }
@@ -386,7 +381,6 @@ static double roq_display_audio_playout_delay_ms(void) {
 static void roq_display_update_stats(uint32_t ticks) {
 	uint32_t elapsed = 0;
 	imquic_path_quality pq = { 0 };
-	uint64_t delta_sent = 0, delta_lost = 0;
 
 	if(video_stats_last_tick == 0) {
 		video_stats_last_tick = ticks;
@@ -416,15 +410,6 @@ static void roq_display_update_stats(uint32_t ticks) {
 	video_rtp_stats.packets_received_window = 0;
 
 	if(stats_conn != NULL && imquic_get_connection_path_quality(stats_conn, &pq) == 0) {
-		delta_sent = pq.packets_sent - path_prev_packets_sent;
-		delta_lost = pq.packets_lost - path_prev_packets_lost;
-		path_prev_packets_sent = pq.packets_sent;
-		path_prev_packets_lost = pq.packets_lost;
-		quic_packets_lost_display = delta_lost;
-		if(delta_sent > 0)
-			quic_loss_rate_display = 100.0 * (double)delta_lost / (double)delta_sent;
-		else
-			quic_loss_rate_display = 0.0;
 		quic_rtt_display_ms = (double)pq.rtt_us / 1000.0;
 		quic_jitter_display_ms = (double)pq.rtt_jitter_us / 1000.0;
 	}
@@ -467,8 +452,7 @@ static void roq_display_render_video_overlay(SDL_Renderer *r) {
 	double fps = 0, bitrate = 0;
 	uint32_t rtp_lost = 0, rtp_recv = 0;
 	double rtp_loss = 0, rtp_jitter = 0;
-	double quic_rtt = 0, quic_jitter = 0, quic_loss = 0;
-	uint64_t quic_lost = 0;
+	double quic_rtt = 0, quic_jitter = 0;
 	double playout = 0;
 
 	if(overlay_font == NULL)
@@ -489,8 +473,6 @@ static void roq_display_render_video_overlay(SDL_Renderer *r) {
 	rtp_jitter = rtp_jitter_display;
 	quic_rtt = quic_rtt_display_ms;
 	quic_jitter = quic_jitter_display_ms;
-	quic_lost = quic_packets_lost_display;
-	quic_loss = quic_loss_rate_display;
 	imquic_mutex_unlock(&stats_mutex);
 	playout = playout_delay_display_ms;
 	if(width <= 0 && height <= 0 && fps <= 0.0 && bitrate <= 0.0 &&
@@ -533,12 +515,6 @@ static void roq_display_render_video_overlay(SDL_Renderer *r) {
 	}
 	if(quic_jitter > 0.0) {
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "QUIC jitter: %.1f ms", quic_jitter);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
-	}
-	if(quic_rtt > 0.0) {
-		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]),
-			"QUIC loss: %"G_GUINT64_FORMAT" (%.1f%%)", quic_lost, quic_loss);
 		lines[line_count] = line_bufs[line_count];
 		line_count++;
 	}

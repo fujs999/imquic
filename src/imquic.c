@@ -556,6 +556,7 @@ int imquic_get_connection_path_quality(imquic_connection *conn, imquic_path_qual
 	quality->rtt_jitter_us = pq.rtt_variant;
 	quality->packets_sent = pq.sent;
 	quality->packets_lost = pq.lost;
+	quality->packets_spurious = pq.spurious_losses;
 	quality->bytes_in_transit = pq.bytes_in_transit;
 	return 0;
 }

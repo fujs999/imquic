@@ -559,6 +559,8 @@ typedef struct imquic_path_quality {
 	uint64_t packets_sent;
 	/*! \brief Packets considered lost among those sent */
 	uint64_t packets_lost;
+	/*! \brief Packets declared lost but later acknowledged (spurious) */
+	uint64_t packets_spurious;
 	/*! \brief Bytes currently in transit */
 	uint64_t bytes_in_transit;
 } imquic_path_quality;
