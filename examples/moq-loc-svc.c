@@ -6,9 +6,31 @@
  */
 
 #include <arpa/inet.h>
+#include <math.h>
 #include <string.h>
 
+#include <imquic/debug.h>
+#include <imquic/imquic.h>
+#include <imquic/mutex.h>
+
 #include "moq-loc-svc.h"
+
+#define MOQ_LOC_SVC_ABR_RTT_TARGET_US     150000
+#define MOQ_LOC_SVC_ABR_JITTER_TARGET_US  50000
+#define MOQ_LOC_SVC_ABR_LOSS_TARGET       0.50
+
+struct moq_loc_svc_abr {
+	int temporal_layers;
+	int max_temporal_layer;
+	int upgrade_holdoff;
+	double stress;
+	double loss_rate;
+	uint64_t prev_packets_sent;
+	uint64_t prev_packets_lost;
+	uint64_t prev_send_ok;
+	uint64_t prev_send_fail;
+	imquic_mutex mutex;
+};
 
 static uint32_t moq_loc_svc_read_bits(const uint8_t *data, size_t len, size_t *bit_offset, int count) {
 	uint32_t value = 0;
@@ -243,10 +265,19 @@ int moq_loc_svc_object_temporal_layer(imquic_moq_object *object) {
 
 gboolean moq_loc_svc_object_within_layer(imquic_demo_video_codec codec, imquic_moq_object *object,
 		int max_temporal_layer, int max_spatial_layer) {
-	moq_loc_svc_layer layer = { 0 };
 	if(object == NULL)
 		return FALSE;
 	if(!moq_loc_svc_is_svc_codec(codec))
+		return TRUE;
+	return moq_loc_svc_object_within_limits(object, max_temporal_layer, max_spatial_layer);
+}
+
+gboolean moq_loc_svc_object_within_limits(imquic_moq_object *object,
+		int max_temporal_layer, int max_spatial_layer) {
+	moq_loc_svc_layer layer = { 0 };
+	if(object == NULL)
+		return FALSE;
+	if(max_temporal_layer < 0 && max_spatial_layer < 0)
 		return TRUE;
 	if(moq_loc_svc_layer_from_properties(object->properties, &layer)) {
 		if(max_temporal_layer >= 0 && layer.temporal_id > (uint8_t)max_temporal_layer)
@@ -261,4 +292,137 @@ gboolean moq_loc_svc_object_within_layer(imquic_demo_video_codec codec, imquic_m
 	if(max_spatial_layer >= 0 && layer.spatial_id > (uint8_t)max_spatial_layer)
 		return FALSE;
 	return TRUE;
+}
+
+static double moq_loc_svc_abr_clamp01(double value) {
+	if(value < 0.0)
+		return 0.0;
+	if(value > 1.0)
+		return 1.0;
+	return value;
+}
+
+moq_loc_svc_abr *moq_loc_svc_abr_create(int temporal_layers) {
+	moq_loc_svc_abr *abr = g_malloc0(sizeof(moq_loc_svc_abr));
+	if(temporal_layers < 2)
+		temporal_layers = 2;
+	if(temporal_layers > MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS)
+		temporal_layers = MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS;
+	abr->temporal_layers = temporal_layers;
+	abr->max_temporal_layer = temporal_layers - 1;
+	abr->upgrade_holdoff = 0;
+	imquic_mutex_init(&abr->mutex);
+	return abr;
+}
+
+void moq_loc_svc_abr_destroy(moq_loc_svc_abr *abr) {
+	if(abr == NULL)
+		return;
+	imquic_mutex_destroy(&abr->mutex);
+	g_free(abr);
+}
+
+void moq_loc_svc_abr_set_temporal_layers(moq_loc_svc_abr *abr, int temporal_layers) {
+	if(abr == NULL)
+		return;
+	if(temporal_layers < 2)
+		temporal_layers = 2;
+	if(temporal_layers > MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS)
+		temporal_layers = MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS;
+	imquic_mutex_lock(&abr->mutex);
+	abr->temporal_layers = temporal_layers;
+	if(abr->max_temporal_layer >= temporal_layers)
+		abr->max_temporal_layer = temporal_layers - 1;
+	imquic_mutex_unlock(&abr->mutex);
+}
+
+void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
+		uint64_t send_ok, uint64_t send_fail, double media_loss_rate) {
+	imquic_path_quality pq = { 0 };
+	double loss_rate = 0.0, stress = 0.0;
+	uint64_t delta_sent = 0, delta_lost = 0, delta_ok = 0, delta_fail = 0;
+	int max_idx = 0, target_max = 0, prev_max = 0;
+
+	if(abr == NULL)
+		return;
+	if(conn != NULL)
+		imquic_get_connection_path_quality(conn, &pq);
+
+	imquic_mutex_lock(&abr->mutex);
+	delta_sent = pq.packets_sent - abr->prev_packets_sent;
+	delta_lost = pq.packets_lost - abr->prev_packets_lost;
+	delta_ok = send_ok - abr->prev_send_ok;
+	delta_fail = send_fail - abr->prev_send_fail;
+	abr->prev_packets_sent = pq.packets_sent;
+	abr->prev_packets_lost = pq.packets_lost;
+	abr->prev_send_ok = send_ok;
+	abr->prev_send_fail = send_fail;
+
+	if(delta_sent > 0)
+		loss_rate = (double)delta_lost / (double)delta_sent;
+	else if((delta_ok + delta_fail) > 0)
+		loss_rate = (double)delta_fail / (double)(delta_ok + delta_fail);
+	if(media_loss_rate >= 0.0)
+		loss_rate = (loss_rate > media_loss_rate) ? loss_rate : media_loss_rate;
+
+	stress = 0.40 * moq_loc_svc_abr_clamp01(loss_rate / MOQ_LOC_SVC_ABR_LOSS_TARGET);
+	stress += 0.25 * moq_loc_svc_abr_clamp01((double)pq.rtt_us / (double)MOQ_LOC_SVC_ABR_RTT_TARGET_US);
+	stress += 0.20 * moq_loc_svc_abr_clamp01((double)pq.rtt_jitter_us / (double)MOQ_LOC_SVC_ABR_JITTER_TARGET_US);
+	if(pq.cwin > 0)
+		stress += 0.15 * moq_loc_svc_abr_clamp01((double)pq.bytes_in_transit / (double)pq.cwin);
+	if(stress > 1.0)
+		stress = 1.0;
+
+	max_idx = abr->temporal_layers - 1;
+	target_max = max_idx - (int)(stress * max_idx + 0.49);
+	if(target_max < 0)
+		target_max = 0;
+	if(target_max > max_idx)
+		target_max = max_idx;
+
+	prev_max = abr->max_temporal_layer;
+	if(target_max < prev_max) {
+		abr->max_temporal_layer = target_max;
+		abr->upgrade_holdoff = 4;
+	} else if(target_max > prev_max) {
+		if(abr->upgrade_holdoff > 0)
+			abr->upgrade_holdoff--;
+		else {
+			abr->max_temporal_layer = target_max;
+			abr->upgrade_holdoff = 4;
+		}
+	} else {
+		if(abr->upgrade_holdoff > 0)
+			abr->upgrade_holdoff--;
+	}
+
+	abr->stress = stress;
+	abr->loss_rate = loss_rate;
+	if(prev_max != abr->max_temporal_layer) {
+		IMQUIC_LOG(IMQUIC_LOG_INFO,
+			"SVC ABR max temporal layer %d -> %d (stress=%.2f, loss=%.1f%%, RTT=%"SCNu64"ms, jitter=%"SCNu64"ms)\n",
+			prev_max, abr->max_temporal_layer, stress, loss_rate * 100.0,
+			pq.rtt_us / 1000, pq.rtt_jitter_us / 1000);
+	}
+	imquic_mutex_unlock(&abr->mutex);
+}
+
+int moq_loc_svc_abr_get_max_temporal_layer(const moq_loc_svc_abr *abr) {
+	int max_layer = 0;
+	if(abr == NULL)
+		return 0;
+	imquic_mutex_lock((imquic_mutex *)&abr->mutex);
+	max_layer = abr->max_temporal_layer;
+	imquic_mutex_unlock((imquic_mutex *)&abr->mutex);
+	return max_layer;
+}
+
+double moq_loc_svc_abr_get_stress(const moq_loc_svc_abr *abr) {
+	double stress = 0.0;
+	if(abr == NULL)
+		return 0.0;
+	imquic_mutex_lock((imquic_mutex *)&abr->mutex);
+	stress = abr->stress;
+	imquic_mutex_unlock((imquic_mutex *)&abr->mutex);
+	return stress;
 }

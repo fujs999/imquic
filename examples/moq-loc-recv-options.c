@@ -26,6 +26,7 @@ gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
 		{ "video-codec", 'e', 0, G_OPTION_ARG_STRING, &options->video_codec, "Video codec to use (default=autodetect when using catalog, otherwise h264-avcc)", "h264-avcc|h264-annexb|h264-svc|vp8|vp9|vp9-svc|av1" },
 		{ "svc-max-temporal-layer", 'T', 0, G_OPTION_ARG_INT, &options->svc_max_temporal_layer, "Maximum SVC temporal layer to decode (-1=all, default=-1)", "0-3" },
 		{ "svc-max-spatial-layer", 0, 0, G_OPTION_ARG_INT, &options->svc_max_spatial_layer, "Maximum SVC spatial layer to decode (-1=all, default=-1)", "0-2" },
+		{ "no-svc-adaptive", 0, 0, G_OPTION_ARG_NONE, &options->no_svc_adaptive, "Disable automatic SVC layer selection in weak networks (default=adaptive when --svc-max-temporal-layer is not set)", NULL },
 		{ "bind", 'b', 0, G_OPTION_ARG_STRING, &options->ip, "Local IP address to bind to (default=all interfaces)", "IP" },
 		{ "port", 'p', 0, G_OPTION_ARG_INT, &options->port, "Local port to bind to (default=0, random)", "port" },
 		{ "remote-host", 'r', 0, G_OPTION_ARG_STRING, &options->remote_host, "QUIC server to connect to (default=none)", "IP" },

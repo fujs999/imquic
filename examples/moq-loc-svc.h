@@ -57,4 +57,18 @@ gboolean moq_loc_svc_object_within_layer(imquic_demo_video_codec codec, imquic_m
 
 int moq_loc_svc_object_temporal_layer(imquic_moq_object *object);
 
+/* Adaptive SVC temporal layer selection for weak networks */
+typedef struct moq_loc_svc_abr moq_loc_svc_abr;
+
+moq_loc_svc_abr *moq_loc_svc_abr_create(int temporal_layers);
+void moq_loc_svc_abr_destroy(moq_loc_svc_abr *abr);
+void moq_loc_svc_abr_set_temporal_layers(moq_loc_svc_abr *abr, int temporal_layers);
+void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
+	uint64_t send_ok, uint64_t send_fail, double media_loss_rate);
+int moq_loc_svc_abr_get_max_temporal_layer(const moq_loc_svc_abr *abr);
+double moq_loc_svc_abr_get_stress(const moq_loc_svc_abr *abr);
+
+gboolean moq_loc_svc_object_within_limits(imquic_moq_object *object,
+	int max_temporal_layer, int max_spatial_layer);
+
 #endif

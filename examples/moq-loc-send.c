@@ -112,6 +112,7 @@ static imquic_mutex send_mutex = IMQUIC_MUTEX_INITIALIZER;
 
 /* Adaptive bitrate */
 static moq_loc_abr *abr = NULL;
+static moq_loc_svc_abr *svc_abr = NULL;
 static moq_loc_svc_config svc_cfg = { 0 };
 static uint64_t send_ok_count = 0, send_fail_count = 0, video_bytes_sent = 0;
 static int applied_enc_generation = 0, applied_audio_bitrate = 0;
@@ -907,26 +908,19 @@ static void *imquic_demo_abr_thread(void *user_data) {
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "Starting ABR control thread\n");
 
 	while(!stop) {
-		if(abr != NULL && moq_conn != NULL && g_atomic_int_get(&video_started)) {
+		if(moq_conn != NULL && g_atomic_int_get(&video_started)) {
 			uint64_t ok = 0, fail = 0, bytes = 0;
-			moq_loc_abr_stats stats = { 0 };
 			imquic_mutex_lock(&send_mutex);
 			ok = send_ok_count;
 			fail = send_fail_count;
 			bytes = video_bytes_sent;
 			imquic_mutex_unlock(&send_mutex);
-			moq_loc_abr_update(abr, moq_conn, ok, fail, bytes);
-			if(moq_loc_svc_is_svc_codec(codec) && svc_cfg.enabled) {
-				moq_loc_abr_get_stats(abr, &stats);
-				if(stats.level >= 0 && svc_cfg.temporal_layers > 0) {
-					int max_layer = svc_cfg.temporal_layers - 1 - stats.level;
-					if(max_layer < 0)
-						max_layer = 0;
-					if(max_layer >= svc_cfg.temporal_layers)
-						max_layer = svc_cfg.temporal_layers - 1;
-					svc_cfg.max_send_temporal_layer = max_layer;
-				}
+			if(svc_abr != NULL && moq_loc_svc_is_svc_codec(codec) && svc_cfg.enabled) {
+				moq_loc_svc_abr_update(svc_abr, moq_conn, ok, fail, -1.0);
+				svc_cfg.max_send_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
 			}
+			if(abr != NULL)
+				moq_loc_abr_update(abr, moq_conn, ok, fail, bytes);
 		}
 		g_usleep(500000);
 	}
@@ -945,7 +939,7 @@ static void imquic_demo_new_connection(imquic_connection *conn, void *user_data)
 		imquic_is_connection_webtransport(conn) ? "WebTransport" : "Raw QUIC",
 		imquic_is_connection_webtransport(conn) ? imquic_get_connection_wt_protocol(conn) : imquic_get_connection_alpn(conn));
 	imquic_moq_set_max_request_id(conn, max_request_id);
-	if(!options.no_adaptive)
+	if(!options.no_adaptive || (moq_loc_svc_is_svc_codec(codec) && svc_cfg.enabled))
 		imquic_enable_connection_loss_feedback(conn);
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] Waiting for MoQ connection to be ready (SETUP)...\n",
 		imquic_get_connection_name(conn));
@@ -1438,9 +1432,8 @@ int main(int argc, char *argv[]) {
 			options.width, options.height, options.video_framerate,
 			options.video_bitrate, applied_audio_bitrate);
 	} else if(moq_loc_svc_is_svc_codec(codec) && !options.no_adaptive) {
-		abr = moq_loc_abr_create(options.width, options.height, options.video_framerate,
-			options.video_bitrate, options.audio_bitrate > 0 ? options.audio_bitrate : 32000);
-		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive streaming enabled (temporal layer selection)\n");
+		svc_abr = moq_loc_svc_abr_create(svc_cfg.temporal_layers);
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive layer selection enabled (targets: RTT<=150ms, jitter<=50ms, loss<=50%%)\n");
 	}
 
 	if(options.publish)
@@ -1488,7 +1481,7 @@ int main(int argc, char *argv[]) {
 		g_atomic_int_set(&stop, 1);
 		goto done;
 	}
-	if(abr != NULL) {
+	if(abr != NULL || svc_abr != NULL) {
 		GError *error = NULL;
 		abr_thread = g_thread_try_new("loc-abr", &imquic_demo_abr_thread, NULL, &error);
 		if(error != NULL) {
@@ -1621,6 +1614,8 @@ done:
 		g_thread_join(abr_thread);
 	if(abr != NULL)
 		moq_loc_abr_destroy(abr);
+	if(svc_abr != NULL)
+		moq_loc_svc_abr_destroy(svc_abr);
 	abr = NULL;
 	if(latest_frame != NULL) {
 		av_freep(&latest_frame->data[0]);

@@ -38,6 +38,7 @@ typedef struct demo_options {
 	gboolean debug_refcounts;
 	int svc_max_temporal_layer;
 	int svc_max_spatial_layer;
+	gboolean no_svc_adaptive;
 } demo_options;
 
 /* Helper method to parse the command line options */

@@ -45,6 +45,7 @@ static imquic_mutex mutex = IMQUIC_MUTEX_INITIALIZER;
 static GHashTable *connections = NULL, *publishers = NULL, *subscribers = NULL, *namespaces = NULL;
 static GList *monitors = NULL;
 static GList *fetches = NULL;
+static GThread *svc_abr_thread = NULL;
 
 /* Helper structs */
 typedef struct imquic_demo_moq_publisher {
@@ -83,6 +84,8 @@ typedef struct imquic_demo_moq_track {
 	GList *subscriptions;
 	GList *objects;
 	GList *properties;
+	gboolean svc_track;
+	int svc_temporal_layers;
 	imquic_mutex mutex;
 } imquic_demo_moq_track;
 static imquic_demo_moq_track *imquic_demo_moq_track_create(imquic_demo_moq_published_namespace *annc, const char *track_name);
@@ -109,6 +112,7 @@ typedef struct imquic_demo_moq_subscription {
 	gboolean fetch;
 	gboolean forward;
 	GList *objects;
+	moq_loc_svc_abr *svc_abr;
 	imquic_mutex mutex;
 } imquic_demo_moq_subscription;
 static imquic_demo_moq_subscription *imquic_demo_moq_subscription_create(imquic_demo_moq_subscriber *sub,
@@ -131,6 +135,66 @@ static void imquic_demo_moq_monitor_destroy(imquic_demo_moq_monitor *mon);
 /* Helper functions to return monitors that match a namespace */
 static GList *imquic_demo_match_monitors(imquic_connection *conn, imquic_moq_namespace *tns);
 static void imquic_demo_alert_monitors(imquic_demo_moq_published_namespace *annc, imquic_demo_moq_track *track, gboolean done);
+
+static void imquic_demo_track_note_svc_object(imquic_demo_moq_track *track, imquic_moq_object *object) {
+	int temporal = 0;
+	if(track == NULL || object == NULL)
+		return;
+	temporal = moq_loc_svc_object_temporal_layer(object);
+	if(temporal < 0)
+		return;
+	track->svc_track = TRUE;
+	if(track->svc_temporal_layers < temporal + 1)
+		track->svc_temporal_layers = temporal + 1;
+}
+
+static void imquic_demo_subscription_ensure_svc_abr(imquic_demo_moq_subscription *s) {
+	int layers = 0;
+	if(s == NULL || s->svc_abr != NULL || options.no_svc_adaptive || options.svc_max_temporal_layer >= 0)
+		return;
+	if(s->track == NULL || !s->track->svc_track)
+		return;
+	layers = s->track->svc_temporal_layers;
+	if(layers < 2)
+		layers = 2;
+	s->svc_abr = moq_loc_svc_abr_create(layers);
+}
+
+static int imquic_demo_subscription_max_temporal(imquic_demo_moq_subscription *s) {
+	if(options.svc_max_temporal_layer >= 0)
+		return options.svc_max_temporal_layer;
+	if(s != NULL && s->svc_abr != NULL)
+		return moq_loc_svc_abr_get_max_temporal_layer(s->svc_abr);
+	return -1;
+}
+
+static void *imquic_demo_svc_abr_thread(void *user_data) {
+	IMQUIC_LOG(IMQUIC_LOG_INFO, "Starting SVC ABR relay thread\n");
+	while(!g_atomic_int_get(&stop)) {
+		imquic_mutex_lock(&mutex);
+		GHashTableIter iter;
+		gpointer value;
+		g_hash_table_iter_init(&iter, subscribers);
+		while(g_hash_table_iter_next(&iter, NULL, &value)) {
+			imquic_demo_moq_subscriber *sub = value;
+			GHashTableIter sub_iter;
+			gpointer sub_value;
+			if(sub == NULL || sub->subscriptions_by_id == NULL)
+				continue;
+			g_hash_table_iter_init(&sub_iter, sub->subscriptions_by_id);
+			while(g_hash_table_iter_next(&sub_iter, NULL, &sub_value)) {
+				imquic_demo_moq_subscription *s = sub_value;
+				if(s == NULL || s->svc_abr == NULL || s->sub == NULL || s->sub->conn == NULL)
+					continue;
+				moq_loc_svc_abr_update(s->svc_abr, s->sub->conn, 0, 0, -1.0);
+			}
+		}
+		imquic_mutex_unlock(&mutex);
+		g_usleep(500000);
+	}
+	IMQUIC_LOG(IMQUIC_LOG_INFO, "Leaving SVC ABR relay thread\n");
+	return NULL;
+}
 
 /* Constructors and destructors for helper structs */
 static imquic_demo_moq_publisher *imquic_demo_moq_publisher_create(imquic_connection *conn) {
@@ -293,6 +357,8 @@ static imquic_demo_moq_subscription *imquic_demo_moq_subscription_create(imquic_
 static void imquic_demo_moq_subscription_destroy(imquic_demo_moq_subscription *s) {
 	if(s) {
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Removing subscription %"SCNu64"/%"SCNu64"\n", s->request_id, s->track_alias);
+		if(s->svc_abr != NULL)
+			moq_loc_svc_abr_destroy(s->svc_abr);
 		if(s->track) {
 			imquic_mutex_lock(&s->track->mutex);
 			s->track->subscriptions = g_list_remove(s->track->subscriptions, s);
@@ -448,6 +514,8 @@ static void imquic_demo_new_connection(imquic_connection *conn, void *user_data)
 		imquic_is_connection_webtransport(conn) ? "WebTransport" : "Raw QUIC",
 		imquic_is_connection_webtransport(conn) ? imquic_get_connection_wt_protocol(conn) : imquic_get_connection_alpn(conn));
 	imquic_moq_set_max_request_id(conn, 100);
+	if(!options.no_svc_adaptive)
+		imquic_enable_connection_loss_feedback(conn);
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] Waiting for MoQ connection to be ready (SETUP)...\n",
 		imquic_get_connection_name(conn));
 }
@@ -1525,6 +1593,7 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 	/* Duplicate the object, in case we need it later for a FETCH */
 	imquic_mutex_lock(&track->mutex);
 	track->objects = g_list_prepend(track->objects, imquic_moq_object_duplicate(object));
+	imquic_demo_track_note_svc_object(track, object);
 	/* Relay the object to all subscribers */
 	if(!options.quiet) {
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] Relaying to %d subscribers\n",
@@ -1558,20 +1627,10 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 				temp = temp->next;
 				continue;
 			}
-			if(options.svc_max_temporal_layer >= 0 || options.svc_max_spatial_layer >= 0) {
-				moq_loc_svc_layer layer = { 0 };
-				uint8_t spatial = 0, temporal = 0;
-				if(moq_loc_svc_layer_from_properties(object->properties, &layer)) {
-					temporal = layer.temporal_id;
-					spatial = layer.spatial_id;
-				} else {
-					moq_loc_svc_unpack_subgroup(object->subgroup_id, &spatial, &temporal);
-				}
-				if(options.svc_max_temporal_layer >= 0 && temporal > (uint8_t)options.svc_max_temporal_layer) {
-					temp = temp->next;
-					continue;
-				}
-				if(options.svc_max_spatial_layer >= 0 && spatial > (uint8_t)options.svc_max_spatial_layer) {
+			imquic_demo_subscription_ensure_svc_abr(s);
+			{
+				int max_temporal = imquic_demo_subscription_max_temporal(s);
+				if(!moq_loc_svc_object_within_limits(object, max_temporal, options.svc_max_spatial_layer)) {
 					temp = temp->next;
 					continue;
 				}
@@ -1647,6 +1706,8 @@ int main(int argc, char *argv[]) {
 	if(options.svc_max_temporal_layer >= 0 || options.svc_max_spatial_layer >= 0) {
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC relay filter: max temporal=%d, max spatial=%d\n",
 			options.svc_max_temporal_layer, options.svc_max_spatial_layer);
+	} else if(!options.no_svc_adaptive) {
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC relay adaptive layer selection enabled (per subscriber)\n");
 	}
 
 	int ret = 0;
@@ -1795,6 +1856,18 @@ int main(int argc, char *argv[]) {
 	/* Start the server */
 	imquic_start_endpoint(server);
 
+	if(!options.no_svc_adaptive && options.svc_max_temporal_layer < 0) {
+		GError *error = NULL;
+		svc_abr_thread = g_thread_try_new("relay-svc-abr", &imquic_demo_svc_abr_thread, NULL, &error);
+		if(error != NULL) {
+			IMQUIC_LOG(IMQUIC_LOG_FATAL, "Got error %d (%s) trying to start SVC ABR thread\n",
+				error->code, error->message ? error->message : "??");
+			ret = 1;
+			imquic_shutdown_endpoint(server);
+			goto done;
+		}
+	}
+
 	while(!stop) {
 		imquic_mutex_lock(&mutex);
 		if(fetches == NULL) {
@@ -1832,6 +1905,9 @@ int main(int argc, char *argv[]) {
 
 
 	imquic_shutdown_endpoint(server);
+
+	if(svc_abr_thread != NULL)
+		g_thread_join(svc_abr_thread);
 
 done:
 	imquic_deinit();

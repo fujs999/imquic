@@ -139,8 +139,12 @@ typedef struct imquic_demo_video_object_stats {
 static imquic_demo_video_object_stats video_object_stats = { 0 };
 static int svc_max_temporal_layer = -1;
 static int svc_max_spatial_layer = -1;
+static int svc_max_temporal_cap = -1;
+static int svc_temporal_layers = 2;
 static int svc_publisher_max_temporal = -1;
 static int svc_current_temporal_layer = 0;
+static gboolean svc_adaptive_enabled = FALSE;
+static moq_loc_svc_abr *svc_abr = NULL;
 static imquic_mutex stats_mutex = IMQUIC_MUTEX_INITIALIZER;
 static imquic_connection *stats_conn = NULL;
 static uint32_t objects_lost_display = 0;
@@ -485,6 +489,19 @@ static double imquic_demo_audio_playout_delay_ms(void) {
 	return (double)queued * 1000.0 / (double)(IMQUIC_DEMO_AUDIO_RATE * 2);
 }
 
+static void imquic_demo_svc_start_adaptive(void) {
+	if(!moq_loc_svc_is_svc_codec(codec) || options.no_svc_adaptive || svc_max_temporal_cap >= 0)
+		return;
+	if(svc_temporal_layers < 2)
+		svc_temporal_layers = 2;
+	if(svc_abr == NULL) {
+		svc_abr = moq_loc_svc_abr_create(svc_temporal_layers);
+		svc_adaptive_enabled = TRUE;
+		svc_max_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive decode enabled (%d temporal layers)\n", svc_temporal_layers);
+	}
+}
+
 static void imquic_demo_new_connection(imquic_connection *conn, void *user_data) {
 	/* Got new connection */
 	imquic_connection_ref(conn);
@@ -495,6 +512,8 @@ static void imquic_demo_new_connection(imquic_connection *conn, void *user_data)
 		imquic_is_connection_webtransport(conn) ? "WebTransport" : "Raw QUIC",
 		imquic_is_connection_webtransport(conn) ? imquic_get_connection_wt_protocol(conn) : imquic_get_connection_alpn(conn));
 	imquic_moq_set_max_request_id(conn, max_request_id);
+	if(svc_adaptive_enabled || (moq_loc_svc_is_svc_codec(codec) && !options.no_svc_adaptive && svc_max_temporal_cap < 0))
+		imquic_enable_connection_loss_feedback(conn);
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] Waiting for MoQ connection to be ready (SETUP)...\n",
 		imquic_get_connection_name(conn));
 }
@@ -752,6 +771,9 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 					if(track->temporal_id > 0)
 						svc_publisher_max_temporal = track->temporal_id;
 					if(moq_loc_svc_is_svc_codec(codec)) {
+						svc_temporal_layers = svc_publisher_max_temporal >= 0 ?
+							svc_publisher_max_temporal + 1 : 2;
+						imquic_demo_svc_start_adaptive();
 						IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- SVC track detected (publisher max temporal=%d)\n",
 							svc_publisher_max_temporal);
 					}
@@ -1034,6 +1056,13 @@ static void imquic_demo_update_video_stats(uint32_t ticks) {
 		quic_rtt_display_ms = (double)pq.rtt_us / 1000.0;
 		quic_jitter_display_ms = (double)pq.rtt_jitter_us / 1000.0;
 	}
+	if(svc_abr != NULL && stats_conn != NULL) {
+		double media_loss = object_loss_rate_display / 100.0;
+		moq_loc_svc_abr_update(svc_abr, stats_conn, 0, 0, media_loss);
+		svc_max_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
+		if(svc_max_temporal_cap >= 0 && svc_max_temporal_layer > svc_max_temporal_cap)
+			svc_max_temporal_layer = svc_max_temporal_cap;
+	}
 	imquic_mutex_unlock(&stats_mutex);
 
 	playout_delay_display_ms = imquic_demo_audio_playout_delay_ms();
@@ -1114,8 +1143,9 @@ static void imquic_demo_render_video_overlay(SDL_Renderer *r) {
 		line_count++;
 	}
 	if(moq_loc_svc_is_svc_codec(codec)) {
+		const char *mode = svc_adaptive_enabled ? "adaptive" : "fixed";
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]),
-			"SVC layer: T%d (max=%d)", svc_current_temporal_layer, svc_max_temporal_layer);
+			"SVC layer: T%d (max=%d, %s)", svc_current_temporal_layer, svc_max_temporal_layer, mode);
 		lines[line_count] = line_bufs[line_count];
 		line_count++;
 	}
@@ -1300,11 +1330,14 @@ int main(int argc, char *argv[]) {
 		imquic_set_refcount_debugging(TRUE);
 	if(options.debug_loc_properties && !options.quiet)
 		IMQUIC_LOG_LOCPROP = IMQUIC_LOG_INFO;
-	svc_max_temporal_layer = options.svc_max_temporal_layer;
+	svc_max_temporal_cap = options.svc_max_temporal_layer;
 	svc_max_spatial_layer = options.svc_max_spatial_layer;
-	if(svc_max_temporal_layer >= 0 || svc_max_spatial_layer >= 0) {
+	if(svc_max_temporal_cap >= 0) {
+		svc_max_temporal_layer = svc_max_temporal_cap;
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC layer filter: max temporal=%d, max spatial=%d\n",
 			svc_max_temporal_layer, svc_max_spatial_layer);
+	} else if(!options.no_svc_adaptive) {
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive layer selection will activate when an SVC track is detected\n");
 	}
 
 	/* Initialize SDL backends */
@@ -1436,6 +1469,7 @@ int main(int argc, char *argv[]) {
 				goto done;
 			}
 			g_strlcpy(video_codec_str, imquic_demo_video_codec_str(codec), sizeof(video_codec_str));
+			imquic_demo_svc_start_adaptive();
 		}
 	}
 
@@ -1593,6 +1627,8 @@ done:
 		av_frame_free(&latest_frame);
 	imquic_moq_track_free(audio_trackname);
 	imquic_moq_track_free(video_trackname);
+	if(svc_abr != NULL)
+		moq_loc_svc_abr_destroy(svc_abr);
 
 	/* SDL stuff */
 	imquic_demo_destroy_overlay_font();

@@ -26,6 +26,7 @@ typedef struct demo_options {
 	const char *video_codec;
 	int svc_max_temporal_layer;
 	int svc_max_spatial_layer;
+	gboolean no_svc_adaptive;
 	const char *ip;
 	int port;
 	const char *remote_host;
