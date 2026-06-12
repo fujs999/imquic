@@ -122,6 +122,8 @@ imquic_moq_loc_send_SOURCES = \
 	moq-loc-svc.h \
 	moq-loc-send-options.c \
 	moq-loc-send-options.h \
+	capture-hw.c \
+	capture-hw.h \
 	moq-utils.c \
 	moq-utils.h
 imquic_moq_loc_send_CFLAGS = \
@@ -203,6 +205,8 @@ if ENABLE_ROQ_CAPTURE
 imquic_roq_sender_SOURCES += \
 	roq-capture.c \
 	roq-capture.h \
+	capture-hw.c \
+	capture-hw.h \
 	moq-loc-abr.c \
 	moq-loc-abr.h \
 	moq-loc-svc.c \

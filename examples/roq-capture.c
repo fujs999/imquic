@@ -22,6 +22,7 @@
 #include <SDL2/SDL.h>
 
 #include "roq-capture.h"
+#include "capture-hw.h"
 #include "moq-loc-abr.h"
 #include "moq-loc-svc.h"
 #include "roq-utils.h"
@@ -59,6 +60,7 @@ static imquic_demo_video_codec video_codec_id = DEMO_H264_ANNEXB;
 static volatile int remote_max_temporal_layer = -1;
 static int applied_enc_generation = 0, applied_audio_bitrate = 0;
 static int enc_target_width = 0, enc_target_height = 0, enc_target_fps = 0;
+static imquic_demo_hw_vendor video_enc_vendor = IMQUIC_DEMO_HW_NONE;
 static volatile int force_video_keyframe = 0;
 
 static void *roq_capture_audio_thread(void *user_data);
@@ -133,63 +135,17 @@ static void roq_capture_configure_svc_encoder(AVCodecContext *ctx) {
 	}
 }
 
-static int roq_capture_open_video_encoder(int width, int height, int fps, int bitrate) {
-	if(video_codec == NULL || width <= 0 || height <= 0 || fps <= 0 || bitrate <= 0)
-		return -1;
-	if(videoenc_ctx != NULL) {
-		avcodec_flush_buffers(videoenc_ctx);
-		avcodec_free_context(&videoenc_ctx);
-		videoenc_ctx = NULL;
-	}
-	videoenc_ctx = avcodec_alloc_context3(video_codec);
-	videoenc_ctx->bit_rate = bitrate;
-	videoenc_ctx->rc_max_rate = videoenc_ctx->bit_rate + (videoenc_ctx->bit_rate / 10);
-	videoenc_ctx->rc_buffer_size = 2 * videoenc_ctx->bit_rate;
-	videoenc_ctx->width = width;
-	videoenc_ctx->height = height;
-	videoenc_ctx->time_base = (AVRational){ 1, fps };
-	videoenc_ctx->framerate = (AVRational){ fps, 1 };
-	videoenc_ctx->gop_size = fps * 2;
-	videoenc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-	if(video_codec_id == DEMO_H264_ANNEXB || video_codec_id == DEMO_H264_AVCC || video_codec_id == DEMO_H264_SVC) {
-		videoenc_ctx->profile = (video_codec_id == DEMO_H264_SVC) ?
-			FF_PROFILE_H264_HIGH : FF_PROFILE_H264_BASELINE;
-		videoenc_ctx->level = 41;
-	}
-	{
-		char br[20];
-		g_snprintf(br, sizeof(br), "%"SCNi64, videoenc_ctx->bit_rate / 1024);
-		if(video_codec_id == DEMO_H264_ANNEXB || video_codec_id == DEMO_H264_AVCC || video_codec_id == DEMO_H264_SVC) {
-			av_opt_set(videoenc_ctx->priv_data, "b", br, AV_OPT_SEARCH_CHILDREN);
-			if(video_codec_id == DEMO_H264_SVC) {
-				av_opt_set(videoenc_ctx->priv_data, "preset", "ultrafast", 0);
-				av_opt_set(videoenc_ctx->priv_data, "tune", "zerolatency", 0);
-			} else {
-				av_opt_set(videoenc_ctx->priv_data, "crf", "23", AV_OPT_SEARCH_CHILDREN);
-				av_opt_set(videoenc_ctx->priv_data, "profile", "baseline", 0);
-				av_opt_set(videoenc_ctx->priv_data, "preset", "ultrafast", 0);
-				av_opt_set(videoenc_ctx->priv_data, "tune", "zerolatency", 0);
-			}
-		} else if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC) {
-			g_snprintf(br, sizeof(br), "%d", bitrate / 1024);
-			av_opt_set(videoenc_ctx->priv_data, "b", br, 0);
-			av_opt_set(videoenc_ctx->priv_data, "speed", "7", 0);
-			av_opt_set_double(videoenc_ctx->priv_data, "max-intra-rate", 300, 0);
-			av_opt_set(videoenc_ctx->priv_data, "quality", "realtime", 0);
-			if(video_codec_id == DEMO_VP9)
-				av_opt_set(videoenc_ctx->priv_data, "lag-in-frames", "0", 0);
-			av_opt_set_int(videoenc_ctx->priv_data, "auto-alt-ref", 0, 0);
-			av_opt_set(videoenc_ctx->priv_data, "tile-columns", "2", 0);
-			av_opt_set(videoenc_ctx->priv_data, "row-mt", "1", 0);
-			av_opt_set(videoenc_ctx->priv_data, "threads", "2", 0);
-		}
-	}
+static void roq_capture_svc_encoder_extra_config(AVCodecContext *ctx, void *user_data) {
+	(void)user_data;
 	if(moq_loc_svc_is_svc_codec(video_codec_id))
-		roq_capture_configure_svc_encoder(videoenc_ctx);
-	if(avcodec_open2(videoenc_ctx, video_codec, NULL) < 0) {
-		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error opening video encoder\n");
-		avcodec_free_context(&videoenc_ctx);
-		videoenc_ctx = NULL;
+		roq_capture_configure_svc_encoder(ctx);
+}
+
+static int roq_capture_open_video_encoder(int width, int height, int fps, int bitrate) {
+	if(width <= 0 || height <= 0 || fps <= 0 || bitrate <= 0)
+		return -1;
+	if(imquic_demo_open_video_encoder(&videoenc_ctx, video_codec_id, width, height, fps, bitrate, FALSE,
+			roq_capture_svc_encoder_extra_config, NULL, &video_codec, &video_enc_vendor) < 0) {
 		return -1;
 	}
 	enc_target_width = width;
@@ -302,28 +258,11 @@ static int roq_capture_create_audio(void) {
 }
 
 static int roq_capture_create_video(void) {
-	const AVInputFormat *vf = av_find_input_format(cfg.video_format);
-	if(vf == NULL) {
-		IMQUIC_LOG(IMQUIC_LOG_ERR, "Couldn't find '%s' format\n", cfg.video_format);
+	char opened_fmt[32] = { 0 };
+	int ret = imquic_demo_open_v4l2_capture(cfg.video_device, cfg.video_format,
+		cfg.video_resolution, cfg.video_framerate, &webcam_fmt, opened_fmt, sizeof(opened_fmt));
+	if(ret < 0)
 		return -1;
-	}
-	AVDictionary *opts = NULL;
-	char webcam_fps[8];
-	g_snprintf(webcam_fps, sizeof(webcam_fps), "%d", cfg.video_framerate);
-	av_dict_set(&opts, "framerate", webcam_fps, 0);
-	av_dict_set(&opts, "video_size", cfg.video_resolution, 0);
-	av_dict_set(&opts, "input_format", "yuyv422", 0);
-	int ret = avformat_open_input(&webcam_fmt, cfg.video_device, vf, &opts);
-	av_dict_free(&opts);
-	if(ret < 0) {
-		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error opening video device '%s'\n", cfg.video_device);
-		return -1;
-	}
-	ret = avformat_find_stream_info(webcam_fmt, NULL);
-	if(ret < 0) {
-		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error accessing video device stream info\n");
-		return -1;
-	}
 	video_stream = 0;
 	for(unsigned int i=0; i<webcam_fmt->nb_streams; i++) {
 		if(webcam_fmt->streams[i]->codecpar &&
@@ -332,10 +271,10 @@ static int roq_capture_create_video(void) {
 			break;
 		}
 	}
-	const AVCodec *webcam_codec = avcodec_find_decoder(webcam_fmt->streams[video_stream]->codecpar->codec_id);
-	webcam_ctx = avcodec_alloc_context3(webcam_codec);
-	avcodec_parameters_to_context(webcam_ctx, webcam_fmt->streams[video_stream]->codecpar);
-	if(avcodec_open2(webcam_ctx, webcam_codec, NULL) < 0) {
+	ret = imquic_demo_open_video_decoder(&webcam_ctx,
+		webcam_fmt->streams[video_stream]->codecpar->codec_id,
+		webcam_fmt->streams[video_stream]->codecpar, NULL, NULL);
+	if(ret < 0) {
 		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error opening video device decoder\n");
 		return -1;
 	}
@@ -389,19 +328,7 @@ int roq_capture_init(const roq_capture_config *config, roq_capture_rtp_cb cb, vo
 		video_codec_id = cfg.video_codec;
 		if(video_codec_id == DEMO_UNKOWN)
 			video_codec_id = DEMO_H264_ANNEXB;
-		if(video_codec_id == DEMO_H264_ANNEXB || video_codec_id == DEMO_H264_AVCC) {
-			video_codec = avcodec_find_encoder_by_name("libx264");
-		} else if(video_codec_id == DEMO_H264_SVC) {
-			video_codec = avcodec_find_encoder_by_name("libopenh264");
-			if(video_codec == NULL) {
-				IMQUIC_LOG(IMQUIC_LOG_WARN, "libopenh264 not found, falling back to libx264 (non-SVC)\n");
-				video_codec = avcodec_find_encoder_by_name("libx264");
-				video_codec_id = DEMO_H264_ANNEXB;
-			}
-		} else if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC) {
-			video_codec = avcodec_find_encoder_by_name("libvpx-vp9");
-		}
-		if(video_codec == NULL) {
+		if(!imquic_demo_any_video_encoder_available(video_codec_id)) {
 			IMQUIC_LOG(IMQUIC_LOG_ERR, "Video codec '%s' not available in libavcodec\n",
 				imquic_demo_video_codec_str(video_codec_id));
 			return -1;
