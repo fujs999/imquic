@@ -30,6 +30,7 @@
 #define MOQ_LOC_ABR_RES_STABLE_DWELL       20
 #define MOQ_LOC_ABR_MIN_LEVEL_DWELL        4
 #define MOQ_LOC_ABR_DEGRADE_DWELL           1
+#define MOQ_LOC_ABR_RES_DEGRADE_DWELL        0
 #define MOQ_LOC_ABR_STRESS_HYSTERESIS      0.04
 
 typedef struct moq_loc_abr_config {

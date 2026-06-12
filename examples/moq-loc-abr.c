@@ -229,10 +229,6 @@ static gboolean moq_loc_abr_step_raises_resolution(int from_step, int to_step) {
 	return (to_step / MOQ_LOC_ABR_SUBSTEPS) < (from_step / MOQ_LOC_ABR_SUBSTEPS);
 }
 
-static gboolean moq_loc_abr_step_lowers_resolution(int from_step, int to_step) {
-	return (to_step / MOQ_LOC_ABR_SUBSTEPS) > (from_step / MOQ_LOC_ABR_SUBSTEPS);
-}
-
 void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
 		uint64_t send_ok, uint64_t send_fail, uint64_t video_bytes_sent) {
 	imquic_path_quality pq = { 0 };
@@ -301,18 +297,28 @@ void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
 		int active_step = moq_loc_abr_active_step(abr);
 		int target_improve = moq_loc_abr_stress_to_step(stress, MOQ_LOC_ABR_STRESS_HYSTERESIS, FALSE);
 		int target_degrade = moq_loc_abr_stress_to_step(stress, MOQ_LOC_ABR_STRESS_HYSTERESIS, TRUE);
+		int active_level = active_step / MOQ_LOC_ABR_SUBSTEPS;
+		int target_level = target_degrade / MOQ_LOC_ABR_SUBSTEPS;
 		int dwell_required = MOQ_LOC_ABR_MIN_LEVEL_DWELL;
 
-		if(target_degrade > active_step)
-			dwell_required = MOQ_LOC_ABR_DEGRADE_DWELL;
+		if(target_degrade > active_step) {
+			if(target_level > active_level)
+				dwell_required = MOQ_LOC_ABR_RES_DEGRADE_DWELL;
+			else
+				dwell_required = MOQ_LOC_ABR_DEGRADE_DWELL;
+		}
 
 		if(abr->level_dwell < dwell_required) {
 			abr->level_dwell++;
 		} else if(target_degrade > active_step) {
 			int next_step = active_step + 1;
-			gboolean res_down = moq_loc_abr_step_lowers_resolution(active_step, next_step);
-			int degrade_holdoff = res_down ? MOQ_LOC_ABR_RES_DEGRADE_HOLDOFF :
-				MOQ_LOC_ABR_DEGRADE_HOLDOFF;
+			int degrade_holdoff = MOQ_LOC_ABR_DEGRADE_HOLDOFF;
+
+			if(target_level > active_level) {
+				/* Skip bitrate/fps substeps and jump to the target resolution level */
+				next_step = target_degrade;
+				degrade_holdoff = MOQ_LOC_ABR_RES_DEGRADE_HOLDOFF;
+			}
 
 			if(abr->degrade_holdoff > 0) {
 				abr->degrade_holdoff--;
