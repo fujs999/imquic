@@ -103,6 +103,7 @@ static size_t video_extradata_cache_size = 0;
 static imquic_demo_video_codec codec = DEMO_H264_AVCC;
 static AVCodec *video_codec = NULL;
 static gboolean got_keyframe = FALSE;
+static gboolean video_decode_synced = TRUE;
 static AVFrame *latest_frame = NULL;
 static imquic_mutex mutex = IMQUIC_MUTEX_INITIALIZER;
 
@@ -155,6 +156,12 @@ static double stream_delay_display_ms = 0;
 static double quic_rtt_display_ms = 0;
 static double quic_jitter_display_ms = 0;
 static double playout_delay_display_ms = 0;
+
+static void imquic_demo_reset_video_decode_sync(void);
+static void imquic_demo_on_video_loss(void);
+static gboolean imquic_demo_should_decode_video(uint64_t group_id, uint64_t object_id, gboolean keyframe);
+static void imquic_demo_track_video_object(uint64_t group_id, uint64_t object_id,
+		uint64_t timestamp, uint64_t timescale);
 
 static int imquic_demo_create_audio_decoder(void) {
 	if(audio_tn == NULL)
@@ -209,7 +216,9 @@ static gboolean imquic_demo_object_is_keyframe(imquic_moq_object *object,
 	/* imquic-moq-loc-send starts a new group on each keyframe with object_id=0 */
 	if(object->object_id == 0)
 		return TRUE;
-	if(codec == DEMO_H264_ANNEXB || codec == DEMO_H264_SVC)
+	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_SVC)
+		return imquic_demo_h264_avcc_is_keyframe(object->payload, object->payload_len);
+	if(codec == DEMO_H264_ANNEXB)
 		return imquic_demo_h264_is_keyframe(object->payload, object->payload_len);
 	if(codec == DEMO_VP8)
 		return imquic_demo_vp8_is_keyframe(object->payload, object->payload_len);
@@ -263,15 +272,17 @@ static int imquic_demo_decode_video(uint8_t *buffer, size_t length, gboolean key
 		while(length >= avcc_offset + 4) {
 			memcpy(&nal_size, buffer + avcc_offset, 4);
 			nal_size = ntohl(nal_size);
-			if(nal_size > 0) {
-				*(buffer + avcc_offset) = 0x00;
-				*(buffer + avcc_offset + 1) = 0x00;
-				*(buffer + avcc_offset + 2) = 0x00;
-				*(buffer + avcc_offset + 3) = 0x01;
-			}
+			if(nal_size == 0 || avcc_offset + 4 + nal_size > length)
+				break;
+			*(buffer + avcc_offset) = 0x00;
+			*(buffer + avcc_offset + 1) = 0x00;
+			*(buffer + avcc_offset + 2) = 0x00;
+			*(buffer + avcc_offset + 3) = 0x01;
 			avcc_offset += 4 + nal_size;
 		}
 	}
+	if(!video_decode_synced && keyframe)
+		avcodec_flush_buffers(videodec_ctx);
 	/* Decode the video frame */
 	AVPacket avpacket = { 0 };
 	avpacket.pts = AV_NOPTS_VALUE;
@@ -283,11 +294,13 @@ static int imquic_demo_decode_video(uint8_t *buffer, size_t length, gboolean key
 		avpacket.flags |= AV_PKT_FLAG_KEY;
 	int ret = avcodec_send_packet(videodec_ctx, &avpacket);
 	if(ret < 0) {
-		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error decoding video frame: %d (%s)\n",
+		IMQUIC_LOG(IMQUIC_LOG_VERB, "Skipping undecodable video frame: %d (%s)\n",
 			ret, av_err2str(ret));
+		imquic_demo_on_video_loss();
 		av_packet_unref(&avpacket);
-		return -1;
+		return 0;
 	}
+	gboolean decoded = FALSE;
 	while(TRUE) {
 		AVFrame *decoded_frame = av_frame_alloc();
 		ret = avcodec_receive_frame(videodec_ctx, decoded_frame);
@@ -296,12 +309,14 @@ static int imquic_demo_decode_video(uint8_t *buffer, size_t length, gboolean key
 			break;
 		}
 		if(ret < 0) {
-			IMQUIC_LOG(IMQUIC_LOG_ERR, "Error decoding video frame: %d (%s)\n",
+			IMQUIC_LOG(IMQUIC_LOG_VERB, "Skipping undecodable video frame: %d (%s)\n",
 				ret, av_err2str(ret));
 			av_frame_free(&decoded_frame);
+			imquic_demo_on_video_loss();
 			av_packet_unref(&avpacket);
-			return -1;
+			return 0;
 		}
+		decoded = TRUE;
 		if(!render) {
 			av_frame_free(&decoded_frame);
 			continue;
@@ -316,6 +331,10 @@ static int imquic_demo_decode_video(uint8_t *buffer, size_t length, gboolean key
 		imquic_mutex_unlock(&mutex);
 	}
 	av_packet_unref(&avpacket);
+	if(keyframe && decoded)
+		video_decode_synced = TRUE;
+	else if(keyframe && !decoded)
+		imquic_demo_on_video_loss();
 	return 0;
 }
 
@@ -348,11 +367,34 @@ static void imquic_demo_set_video_extradata_cache(const uint8_t *extradata, size
 	}
 }
 
+static void imquic_demo_reset_video_decode_sync(void) {
+	video_decode_synced = FALSE;
+}
+
+static void imquic_demo_on_video_loss(void) {
+	imquic_demo_reset_video_decode_sync();
+	if(videodec_ctx != NULL)
+		avcodec_flush_buffers(videodec_ctx);
+}
+
 static void imquic_demo_destroy_video_decoder(void) {
 	if(videodec_ctx != NULL)
 		avcodec_free_context(&videodec_ctx);
 	videodec_ctx = NULL;
 	imquic_demo_clear_video_extradata_cache();
+	got_keyframe = FALSE;
+	video_decode_synced = FALSE;
+}
+
+static gboolean imquic_demo_should_decode_video(uint64_t group_id, uint64_t object_id, gboolean keyframe) {
+	if(video_decode_synced)
+		return TRUE;
+	if(!keyframe) {
+		IMQUIC_LOG(IMQUIC_LOG_VERB, "Waiting for keyframe after loss, skipping object %"SCNu64"/%"SCNu64"\n",
+			group_id, object_id);
+		return FALSE;
+	}
+	return TRUE;
 }
 
 static int imquic_demo_ensure_video_decoder(struct imquic_moq_property_data *loc_extradata, gboolean keyframe) {
@@ -421,6 +463,11 @@ static void imquic_demo_process_video_buffer(void) {
 			continue;
 		}
 		gboolean render = (temp->next == NULL);
+		imquic_demo_track_video_object(object->group_id, object->object_id, 0, G_USEC_PER_SEC);
+		if(!imquic_demo_should_decode_video(object->group_id, object->object_id, keyframe)) {
+			temp = temp->next;
+			continue;
+		}
 		imquic_demo_decode_video(object->payload, object->payload_len, keyframe, render);
 		temp = temp->next;
 	}
@@ -461,11 +508,15 @@ static void imquic_demo_track_video_object(uint64_t group_id, uint64_t object_id
 		if(group_id == video_object_stats.last_group_id) {
 			if(object_id > video_object_stats.last_object_id) {
 				uint64_t gap = object_id - video_object_stats.last_object_id - 1;
-				if(gap > 0)
+				if(gap > 0) {
 					video_object_stats.objects_lost_window += (uint32_t)gap;
+					imquic_demo_on_video_loss();
+				}
 				video_object_stats.last_object_id = object_id;
 			}
 		} else if(group_id > video_object_stats.last_group_id) {
+			if(object_id != 0)
+				imquic_demo_on_video_loss();
 			video_object_stats.last_group_id = group_id;
 			video_object_stats.last_object_id = object_id;
 		}
@@ -923,8 +974,12 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 				return;
 			}
 			gboolean render = (object->delivery != IMQUIC_MOQ_USE_FETCH);
-			if(render && timescale > 0)
+			if(timescale > 0)
 				imquic_demo_track_video_object(object->group_id, object->object_id, timestamp, timescale);
+			else
+				imquic_demo_track_video_object(object->group_id, object->object_id, 0, G_USEC_PER_SEC);
+			if(!imquic_demo_should_decode_video(object->group_id, object->object_id, keyframe))
+				return;
 			imquic_demo_decode_video(object->payload, object->payload_len, keyframe, render);
 		}
 	}

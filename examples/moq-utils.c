@@ -221,6 +221,59 @@ imquic_demo_video_codec imquic_demo_video_codec_from_str(const char *codec) {
 	# define swap2(d) d
 #endif
 
+static size_t imquic_demo_h264_start_code_len(const uint8_t *data, size_t len, size_t pos) {
+	if(pos + 3 > len)
+		return 0;
+	if(data[pos] == 0x00 && data[pos + 1] == 0x00 && data[pos + 2] == 0x01)
+		return 3;
+	if(pos + 4 <= len && data[pos] == 0x00 && data[pos + 1] == 0x00 &&
+			data[pos + 2] == 0x00 && data[pos + 3] == 0x01)
+		return 4;
+	return 0;
+}
+
+void imquic_demo_h264_annexb_to_avcc(uint8_t *buffer, size_t len) {
+	size_t pos = 0;
+
+	if(!buffer || len < 4)
+		return;
+	while(pos < len) {
+		size_t sc_len = imquic_demo_h264_start_code_len(buffer, len, pos);
+		if(sc_len == 0) {
+			pos++;
+			continue;
+		}
+		size_t nal_start = pos + sc_len;
+		size_t next = nal_start;
+		while(next < len) {
+			if(imquic_demo_h264_start_code_len(buffer, len, next) > 0)
+				break;
+			next++;
+		}
+		uint32_t nal_size = htonl((uint32_t)(next - nal_start));
+		memcpy(buffer + pos, &nal_size, 4);
+		pos = next;
+	}
+}
+
+gboolean imquic_demo_h264_avcc_is_keyframe(uint8_t *buffer, size_t len) {
+	size_t offset = 0;
+
+	if(!buffer || len < 5)
+		return FALSE;
+	while(len >= offset + 4) {
+		uint32_t nal_size = 0;
+		memcpy(&nal_size, buffer + offset, 4);
+		nal_size = ntohl(nal_size);
+		if(nal_size == 0 || len < offset + 4 + nal_size)
+			break;
+		if((buffer[offset + 4] & 0x1F) == 5)
+			return TRUE;
+		offset += 4 + nal_size;
+	}
+	return FALSE;
+}
+
 gboolean imquic_demo_h264_is_keyframe(uint8_t *buffer, size_t len) {
 	if(!buffer || len < 6)
 		return FALSE;

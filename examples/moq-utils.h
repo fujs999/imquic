@@ -57,8 +57,12 @@ typedef enum imquic_demo_video_codec {
 const char *imquic_demo_video_codec_str(imquic_demo_video_codec codec);
 imquic_demo_video_codec imquic_demo_video_codec_from_str(const char *codec);
 
+/* H.264 bitstream helpers */
+void imquic_demo_h264_annexb_to_avcc(uint8_t *buffer, size_t len);
+
 /* Keyframe detection */
 gboolean imquic_demo_h264_is_keyframe(uint8_t *buffer, size_t len);
+gboolean imquic_demo_h264_avcc_is_keyframe(uint8_t *buffer, size_t len);
 gboolean imquic_demo_vp8_is_keyframe(uint8_t *buffer, size_t len);
 gboolean imquic_demo_vp9_is_keyframe(uint8_t *buffer, size_t len);
 gboolean imquic_demo_vp9_rtp_is_keyframe(const uint8_t *payload, size_t payload_len);

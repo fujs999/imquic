@@ -842,23 +842,8 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 			video_object_id = 0;
 		}
 		/* Check if we need to switch from Annex-B to AVCC */
-		if(codec == DEMO_H264_AVCC || codec == DEMO_H264_SVC) {
-			size_t annexb_offset = 0, index = 4, nal_size = 0;
-			while((size_t)packet.size >= index) {
-				if(packet.data[index] == 0x00 && packet.data[index+1] == 0x00 &&
-						packet.data[index+2] == 0x00 && packet.data[3] == 0x01) {
-					/* Found a start code, that determined the NAL size */
-					nal_size = index - annexb_offset + 4;
-					memcpy(packet.data + annexb_offset, &nal_size, 4);
-					annexb_offset = index;
-					index += 4;
-				} else {
-					index++;
-				}
-			}
-			nal_size = packet.size - annexb_offset + 4;
-			memcpy(packet.data + annexb_offset, &nal_size, 4);
-		}
+		if(codec == DEMO_H264_AVCC || codec == DEMO_H264_SVC)
+			imquic_demo_h264_annexb_to_avcc(packet.data, (size_t)packet.size);
 		/* Write the LOC info first as extensions */
 		GList *props = NULL;
 		imquic_moq_property timescale = { 0 };
