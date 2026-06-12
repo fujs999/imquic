@@ -308,11 +308,15 @@ static void imquic_demo_apply_abr_video_config(void) {
 	if(generation == applied_enc_generation)
 		return;
 	moq_loc_abr_get_config(abr, &cfg);
-	if(cfg.width != enc_target_width || cfg.height != enc_target_height || cfg.fps != enc_target_fps) {
+	if(videoenc_ctx == NULL) {
+		if(imquic_demo_open_video_encoder_ctx(cfg.width, cfg.height, cfg.fps, cfg.video_bitrate) < 0)
+			return;
+	} else if(cfg.width != enc_target_width || cfg.height != enc_target_height) {
 		if(imquic_demo_open_video_encoder_ctx(cfg.width, cfg.height, cfg.fps, cfg.video_bitrate) < 0)
 			return;
 	} else {
 		imquic_demo_apply_video_bitrate(cfg.video_bitrate);
+		enc_target_fps = cfg.fps;
 	}
 	applied_enc_generation = generation;
 }

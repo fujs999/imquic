@@ -25,6 +25,9 @@ struct moq_loc_abr {
 	uint64_t prev_packets_lost;
 	uint64_t prev_send_ok;
 	uint64_t prev_send_fail;
+	int improve_holdoff;
+	int degrade_holdoff;
+	int level_dwell;
 };
 
 static int moq_loc_abr_even_dim(int value) {
@@ -72,11 +75,9 @@ void moq_loc_abr_fit_dimensions(int max_width, int max_height, int target_width,
 }
 
 static void moq_loc_abr_build_ladder(moq_loc_abr *abr) {
-	const double res_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.75, 0.50, 0.375, 0.25, 0.125 };
 	const double fps_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.80, 0.60, 0.40, 0.25, 0.10 };
 	const double vbr_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.50, 0.25, 0.125, 0.0625, 0.03125 };
 	const double abr_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.75, 0.50, 0.375, 0.25, 0.1875 };
-	const int min_widths[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 320, 320, 160 };
 	const int min_fps[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 0, 5, 2 };
 	const int min_vbr[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 0, 64000, 32000 };
 	const int min_abr[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 0, 8000, 6000 };
@@ -84,8 +85,9 @@ static void moq_loc_abr_build_ladder(moq_loc_abr *abr) {
 
 	for(i = 0; i < MOQ_LOC_ABR_LEVELS; i++) {
 		moq_loc_abr_config *level = &abr->levels[i];
-		moq_loc_abr_scale_resolution(abr->max_width, abr->max_height, res_factors[i],
-			min_widths[i], &level->width, &level->height);
+		/* Keep max resolution at every level; adapt fps and bitrate only */
+		level->width = abr->max_width;
+		level->height = abr->max_height;
 		level->fps = (int)(abr->max_fps * fps_factors[i]);
 		if(level->fps < min_fps[i])
 			level->fps = min_fps[i];
@@ -114,6 +116,9 @@ moq_loc_abr *moq_loc_abr_create(int max_width, int max_height, int max_fps,
 	abr->active_level = 0;
 	abr->config_generation = 1;
 	abr->stats.level = 0;
+	abr->improve_holdoff = MOQ_LOC_ABR_IMPROVE_HOLDOFF;
+	abr->degrade_holdoff = MOQ_LOC_ABR_DEGRADE_HOLDOFF;
+	abr->level_dwell = MOQ_LOC_ABR_MIN_LEVEL_DWELL;
 	return abr;
 }
 
@@ -132,18 +137,20 @@ static double moq_loc_abr_clamp01(double value) {
 	return value;
 }
 
-static int moq_loc_abr_stress_to_level(double stress) {
-	if(stress < 0.12)
-		return 0;
-	if(stress < 0.28)
-		return 1;
-	if(stress < 0.42)
-		return 2;
-	if(stress < 0.58)
-		return 3;
-	if(stress < 0.74)
-		return 4;
-	return 5;
+static int moq_loc_abr_stress_to_level(double stress, double margin, gboolean worsen) {
+	const double thresholds[MOQ_LOC_ABR_LEVELS - 1] = { 0.12, 0.28, 0.42, 0.58, 0.74 };
+	int level = 0;
+
+	for(level = 0; level < (MOQ_LOC_ABR_LEVELS - 1); level++) {
+		double threshold = thresholds[level];
+		if(worsen)
+			threshold += margin;
+		else
+			threshold -= margin;
+		if(stress < threshold)
+			return level;
+	}
+	return MOQ_LOC_ABR_LEVELS - 1;
 }
 
 void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
@@ -153,7 +160,7 @@ void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
 	double congestion_factor = 0.0, send_fail_factor = 0.0, bandwidth_factor = 0.0;
 	double stress = 0.0;
 	uint64_t delta_sent = 0, delta_lost = 0, delta_ok = 0, delta_fail = 0;
-	int target_level = 0, required_bps = 0;
+	int required_bps = 0;
 	gboolean config_changed = FALSE;
 
 	if(abr == NULL)
@@ -200,22 +207,38 @@ void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
 	if(stress > 1.0)
 		stress = 1.0;
 
-	target_level = moq_loc_abr_stress_to_level(stress);
-	if(target_level > abr->active_level) {
-		abr->active_level = target_level;
-		abr->stats.upgrade_holdoff = 3;
-		config_changed = TRUE;
-	} else if(target_level < abr->active_level) {
-		if(abr->stats.upgrade_holdoff > 0)
-			abr->stats.upgrade_holdoff--;
-		else {
-			abr->active_level = target_level;
-			abr->stats.upgrade_holdoff = 3;
-			config_changed = TRUE;
-		}
+	if(abr->level_dwell < MOQ_LOC_ABR_MIN_LEVEL_DWELL) {
+		abr->level_dwell++;
 	} else {
-		abr->stats.upgrade_holdoff = 3;
+		int target_improve = moq_loc_abr_stress_to_level(stress, MOQ_LOC_ABR_STRESS_HYSTERESIS, FALSE);
+		int target_degrade = moq_loc_abr_stress_to_level(stress, MOQ_LOC_ABR_STRESS_HYSTERESIS, TRUE);
+
+		if(target_degrade > abr->active_level) {
+			if(abr->degrade_holdoff > 0) {
+				abr->degrade_holdoff--;
+			} else {
+				abr->active_level++;
+				abr->degrade_holdoff = MOQ_LOC_ABR_DEGRADE_HOLDOFF;
+				abr->improve_holdoff = MOQ_LOC_ABR_IMPROVE_HOLDOFF;
+				abr->level_dwell = 0;
+				config_changed = TRUE;
+			}
+		} else if(target_improve < abr->active_level) {
+			if(abr->improve_holdoff > 0) {
+				abr->improve_holdoff--;
+			} else {
+				abr->active_level--;
+				abr->improve_holdoff = MOQ_LOC_ABR_IMPROVE_HOLDOFF;
+				abr->degrade_holdoff = MOQ_LOC_ABR_DEGRADE_HOLDOFF;
+				abr->level_dwell = 0;
+				config_changed = TRUE;
+			}
+		} else {
+			abr->improve_holdoff = MOQ_LOC_ABR_IMPROVE_HOLDOFF;
+			abr->degrade_holdoff = MOQ_LOC_ABR_DEGRADE_HOLDOFF;
+		}
 	}
+	abr->stats.upgrade_holdoff = abr->improve_holdoff;
 
 	abr->stats.stress = stress;
 	abr->stats.loss_rate = loss_rate;
