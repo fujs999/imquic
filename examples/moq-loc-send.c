@@ -842,8 +842,23 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 			video_object_id = 0;
 		}
 		/* Check if we need to switch from Annex-B to AVCC */
-		if(codec == DEMO_H264_AVCC || codec == DEMO_H264_SVC)
-			imquic_demo_h264_annexb_to_avcc(packet.data, (size_t)packet.size);
+		uint8_t *video_payload = packet.data;
+		size_t video_payload_len = (size_t)packet.size;
+		uint8_t *avcc_payload = NULL;
+		if(codec == DEMO_H264_AVCC || codec == DEMO_H264_SVC) {
+			size_t avcc_cap = (size_t)packet.size + 4096;
+			avcc_payload = g_malloc(avcc_cap);
+			size_t avcc_len = imquic_demo_h264_annexb_to_avcc_pack(packet.data, (size_t)packet.size,
+				avcc_payload, avcc_cap);
+			if(avcc_len == 0) {
+				IMQUIC_LOG(IMQUIC_LOG_WARN, "Failed to convert Annex-B to AVCC, dropping frame\n");
+				g_free(avcc_payload);
+				av_packet_unref(&packet);
+				continue;
+			}
+			video_payload = avcc_payload;
+			video_payload_len = avcc_len;
+		}
 		/* Write the LOC info first as extensions */
 		GList *props = NULL;
 		imquic_moq_property timescale = { 0 };
@@ -890,14 +905,15 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 			.group_id = video_group_id,
 			.subgroup_id = svc ? moq_loc_svc_subgroup_id(layer.spatial_id, layer.temporal_id) : 0,
 			.object_id = video_object_id,
-			.payload = packet.data,
-			.payload_len = packet.size,
+			.payload = video_payload,
+			.payload_len = video_payload_len,
 			.properties = props,
 			.delivery = IMQUIC_MOQ_USE_SUBGROUP,
 			.end_of_stream = FALSE
 		};
 		video_object_id++;
 		imquic_demo_send_object(&object, TRUE);
+		g_free(avcc_payload);
 		g_list_free(props);
 		av_packet_unref(&packet);
 	}

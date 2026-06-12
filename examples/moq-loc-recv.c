@@ -266,20 +266,13 @@ static int imquic_demo_decode_video(uint8_t *buffer, size_t length, gboolean key
 		}
 		got_keyframe = TRUE;
 	}
-	/* Check of we need to switch from AVCC to Annex-B */
 	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_SVC) {
-		size_t avcc_offset = 0, nal_size = 0;
-		while(length >= avcc_offset + 4) {
-			memcpy(&nal_size, buffer + avcc_offset, 4);
-			nal_size = ntohl(nal_size);
-			if(nal_size == 0 || avcc_offset + 4 + nal_size > length)
-				break;
-			*(buffer + avcc_offset) = 0x00;
-			*(buffer + avcc_offset + 1) = 0x00;
-			*(buffer + avcc_offset + 2) = 0x00;
-			*(buffer + avcc_offset + 3) = 0x01;
-			avcc_offset += 4 + nal_size;
+		if(!imquic_demo_h264_avcc_complete(buffer, length)) {
+			IMQUIC_LOG(IMQUIC_LOG_VERB, "Incomplete AVCC frame (%zu bytes), skipping\n", length);
+			imquic_demo_on_video_loss();
+			return 0;
 		}
+		imquic_demo_h264_avcc_to_annexb(buffer, length);
 	}
 	if(!video_decode_synced && keyframe)
 		avcodec_flush_buffers(videodec_ctx);
@@ -311,6 +304,14 @@ static int imquic_demo_decode_video(uint8_t *buffer, size_t length, gboolean key
 		if(ret < 0) {
 			IMQUIC_LOG(IMQUIC_LOG_VERB, "Skipping undecodable video frame: %d (%s)\n",
 				ret, av_err2str(ret));
+			av_frame_free(&decoded_frame);
+			imquic_demo_on_video_loss();
+			av_packet_unref(&avpacket);
+			return 0;
+		}
+		if(decoded_frame->decode_error_flags != 0) {
+			IMQUIC_LOG(IMQUIC_LOG_VERB, "Skipping corrupt video frame (decode_error_flags=%u)\n",
+				decoded_frame->decode_error_flags);
 			av_frame_free(&decoded_frame);
 			imquic_demo_on_video_loss();
 			av_packet_unref(&avpacket);

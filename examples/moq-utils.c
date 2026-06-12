@@ -222,37 +222,83 @@ imquic_demo_video_codec imquic_demo_video_codec_from_str(const char *codec) {
 #endif
 
 static size_t imquic_demo_h264_start_code_len(const uint8_t *data, size_t len, size_t pos) {
-	if(pos + 3 > len)
-		return 0;
-	if(data[pos] == 0x00 && data[pos + 1] == 0x00 && data[pos + 2] == 0x01)
-		return 3;
 	if(pos + 4 <= len && data[pos] == 0x00 && data[pos + 1] == 0x00 &&
 			data[pos + 2] == 0x00 && data[pos + 3] == 0x01)
 		return 4;
+	if(pos + 3 <= len && data[pos] == 0x00 && data[pos + 1] == 0x00 &&
+			data[pos + 2] == 0x01)
+		return 3;
 	return 0;
 }
 
-void imquic_demo_h264_annexb_to_avcc(uint8_t *buffer, size_t len) {
-	size_t pos = 0;
+size_t imquic_demo_h264_annexb_to_avcc_pack(const uint8_t *src, size_t src_len,
+		uint8_t *dst, size_t dst_cap) {
+	size_t src_pos = 0, dst_pos = 0;
 
-	if(!buffer || len < 4)
-		return;
-	while(pos < len) {
-		size_t sc_len = imquic_demo_h264_start_code_len(buffer, len, pos);
+	if(!src || !dst || src_len < 4 || dst_cap < 5)
+		return 0;
+	while(src_pos < src_len) {
+		size_t sc_len = imquic_demo_h264_start_code_len(src, src_len, src_pos);
 		if(sc_len == 0) {
-			pos++;
+			src_pos++;
 			continue;
 		}
-		size_t nal_start = pos + sc_len;
+		size_t nal_start = src_pos + sc_len;
 		size_t next = nal_start;
-		while(next < len) {
-			if(imquic_demo_h264_start_code_len(buffer, len, next) > 0)
+		while(next < src_len) {
+			if(imquic_demo_h264_start_code_len(src, src_len, next) > 0)
 				break;
 			next++;
 		}
-		uint32_t nal_size = htonl((uint32_t)(next - nal_start));
-		memcpy(buffer + pos, &nal_size, 4);
-		pos = next;
+		size_t nal_size = next - nal_start;
+		if(nal_size == 0 || dst_pos + 4 + nal_size > dst_cap)
+			return 0;
+		uint32_t be = htonl((uint32_t)nal_size);
+		memcpy(dst + dst_pos, &be, 4);
+		memcpy(dst + dst_pos + 4, src + nal_start, nal_size);
+		dst_pos += 4 + nal_size;
+		src_pos = next;
+	}
+	return dst_pos > 0 ? dst_pos : 0;
+}
+
+gboolean imquic_demo_h264_avcc_complete(const uint8_t *buffer, size_t len) {
+	size_t offset = 0;
+	gboolean found_nal = FALSE;
+
+	if(!buffer || len < 5)
+		return FALSE;
+	while(len >= offset + 4) {
+		uint32_t nal_size = 0;
+		memcpy(&nal_size, buffer + offset, 4);
+		nal_size = ntohl(nal_size);
+		if(nal_size == 0)
+			return FALSE;
+		offset += 4;
+		if(offset + nal_size > len)
+			return FALSE;
+		found_nal = TRUE;
+		offset += nal_size;
+	}
+	return found_nal && offset == len;
+}
+
+void imquic_demo_h264_avcc_to_annexb(uint8_t *buffer, size_t len) {
+	size_t offset = 0;
+
+	if(!buffer || len < 4)
+		return;
+	while(len >= offset + 4) {
+		uint32_t nal_size = 0;
+		memcpy(&nal_size, buffer + offset, 4);
+		nal_size = ntohl(nal_size);
+		if(nal_size == 0 || offset + 4 + nal_size > len)
+			break;
+		buffer[offset] = 0x00;
+		buffer[offset + 1] = 0x00;
+		buffer[offset + 2] = 0x00;
+		buffer[offset + 3] = 0x01;
+		offset += 4 + nal_size;
 	}
 }
 

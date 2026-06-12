@@ -58,7 +58,10 @@ const char *imquic_demo_video_codec_str(imquic_demo_video_codec codec);
 imquic_demo_video_codec imquic_demo_video_codec_from_str(const char *codec);
 
 /* H.264 bitstream helpers */
-void imquic_demo_h264_annexb_to_avcc(uint8_t *buffer, size_t len);
+size_t imquic_demo_h264_annexb_to_avcc_pack(const uint8_t *src, size_t src_len,
+		uint8_t *dst, size_t dst_cap);
+void imquic_demo_h264_avcc_to_annexb(uint8_t *buffer, size_t len);
+gboolean imquic_demo_h264_avcc_complete(const uint8_t *buffer, size_t len);
 
 /* Keyframe detection */
 gboolean imquic_demo_h264_is_keyframe(uint8_t *buffer, size_t len);
