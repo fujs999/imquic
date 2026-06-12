@@ -63,6 +63,57 @@ static int enc_target_width = 0, enc_target_height = 0, enc_target_fps = 0;
 static enum AVPixelFormat enc_target_pix_fmt = AV_PIX_FMT_YUV420P;
 static imquic_demo_hw_vendor video_enc_vendor = IMQUIC_DEMO_HW_NONE;
 static volatile int force_video_keyframe = 0;
+static int64_t video_input_pts = 0;
+
+static gboolean roq_capture_emit_rtp(uint8_t *rtp, size_t rtp_len, void *user_data);
+static void roq_capture_apply_svc_send_layer(void);
+
+static void roq_capture_send_video_packet(AVPacket *packet, int target_fps) {
+	gboolean kf = (packet->flags & AV_PKT_FLAG_KEY);
+	moq_loc_svc_layer layer = { 0 };
+	gboolean svc = moq_loc_svc_is_svc_codec(video_codec_id);
+	if(svc) {
+		roq_capture_apply_svc_send_layer();
+		if(moq_loc_svc_parse_packet(video_codec_id, packet->data, (size_t)packet->size, FALSE, &layer) < 0) {
+			layer.temporal_id = 0;
+			layer.spatial_id = 0;
+			layer.is_keyframe = kf;
+		} else if(!layer.is_keyframe) {
+			layer.is_keyframe = kf;
+		}
+		if(layer.temporal_id > svc_cfg.max_send_temporal_layer) {
+			IMQUIC_LOG(IMQUIC_LOG_VERB, "Dropping SVC layer T%d (max=%d)\n",
+				layer.temporal_id, svc_cfg.max_send_temporal_layer);
+			return;
+		}
+	}
+	if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC) {
+		imquic_roq_rtp_packetize_vp9(&video_rtp, packet->data, (size_t)packet->size, target_fps, kf,
+			roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
+	} else if(video_codec_id == DEMO_VP8) {
+		imquic_roq_rtp_packetize_vp8(&video_rtp, packet->data, (size_t)packet->size, target_fps, kf,
+			roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
+	} else {
+		imquic_roq_rtp_packetize_h264_annexb(&video_rtp, packet->data, (size_t)packet->size, target_fps,
+			roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
+	}
+}
+
+static void roq_capture_drain_video_encoder(int target_fps) {
+	AVPacket packet = { 0 };
+	while(TRUE) {
+		int ret = avcodec_receive_packet(videoenc_ctx, &packet);
+		if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+			break;
+		if(ret < 0) {
+			IMQUIC_LOG(IMQUIC_LOG_ERR, "Error receiving encoded video packet: %d (%s)\n",
+				ret, av_err2str(ret));
+			break;
+		}
+		roq_capture_send_video_packet(&packet, target_fps);
+		av_packet_unref(&packet);
+	}
+}
 
 static void *roq_capture_audio_thread(void *user_data);
 static void *roq_capture_video_capture_thread(void *user_data);
@@ -160,6 +211,7 @@ static int roq_capture_open_video_encoder(int width, int height, int fps, int bi
 		latest_frame = NULL;
 	}
 	imquic_mutex_unlock(&frame_mutex);
+	video_input_pts = 0;
 	return 0;
 }
 
@@ -551,7 +603,6 @@ static void *roq_capture_video_capture_thread(void *user_data) {
 
 static void *roq_capture_video_enc_thread(void *user_data) {
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "Starting video encoding thread\n");
-	AVPacket packet = { 0 };
 	int64_t now = 0, before = 0;
 	int target_fps = cfg.video_framerate > 0 ? cfg.video_framerate : 25;
 	int64_t wait = G_USEC_PER_SEC / target_fps;
@@ -576,69 +627,49 @@ static void *roq_capture_video_enc_thread(void *user_data) {
 			before = now - wait;
 		if((now - before) < (wait - 1000)) {
 			g_usleep(1000);
+			roq_capture_drain_video_encoder(target_fps);
 			continue;
 		}
 		before += wait;
+
+		roq_capture_drain_video_encoder(target_fps);
 
 		imquic_mutex_lock(&frame_mutex);
 		if(latest_frame == NULL || videoenc_ctx == NULL) {
 			imquic_mutex_unlock(&frame_mutex);
 			continue;
 		}
-		if(latest_frame->width != videoenc_ctx->width || latest_frame->height != videoenc_ctx->height) {
+		if(latest_frame->width != enc_target_width || latest_frame->height != enc_target_height) {
 			imquic_mutex_unlock(&frame_mutex);
 			continue;
 		}
+		AVFrame *encode_frame = av_frame_clone(latest_frame);
+		imquic_mutex_unlock(&frame_mutex);
+		if(encode_frame == NULL) {
+			IMQUIC_LOG(IMQUIC_LOG_ERR, "Failed to clone video frame for encoding\n");
+			continue;
+		}
 		if(g_atomic_int_get(&force_video_keyframe)) {
-			latest_frame->pict_type = AV_PICTURE_TYPE_I;
+			encode_frame->pict_type = AV_PICTURE_TYPE_I;
 			g_atomic_int_set(&force_video_keyframe, 0);
 		} else {
-			latest_frame->pict_type = AV_PICTURE_TYPE_NONE;
+			encode_frame->pict_type = AV_PICTURE_TYPE_NONE;
 		}
-		int ret = avcodec_send_frame(videoenc_ctx, latest_frame);
-		imquic_mutex_unlock(&frame_mutex);
+		encode_frame->pts = video_input_pts++;
+		if(encode_frame->color_range == AVCOL_RANGE_UNSPECIFIED)
+			encode_frame->color_range = AVCOL_RANGE_MPEG;
+
+		int ret = avcodec_send_frame(videoenc_ctx, encode_frame);
+		if(ret == AVERROR(EAGAIN)) {
+			roq_capture_drain_video_encoder(target_fps);
+			ret = avcodec_send_frame(videoenc_ctx, encode_frame);
+		}
+		av_frame_free(&encode_frame);
 		if(ret < 0) {
 			IMQUIC_LOG(IMQUIC_LOG_ERR, "Error encoding video frame: %d (%s)\n", ret, av_err2str(ret));
 			continue;
 		}
-		memset(&packet, 0, sizeof(packet));
-		ret = avcodec_receive_packet(videoenc_ctx, &packet);
-		if(ret == AVERROR(EAGAIN))
-			continue;
-		if(ret < 0) {
-			IMQUIC_LOG(IMQUIC_LOG_ERR, "Error encoding video frame: %d (%s)\n", ret, av_err2str(ret));
-			continue;
-		}
-		gboolean kf = (packet.flags & AV_PKT_FLAG_KEY);
-		moq_loc_svc_layer layer = { 0 };
-		gboolean svc = moq_loc_svc_is_svc_codec(video_codec_id);
-		if(svc) {
-			roq_capture_apply_svc_send_layer();
-			if(moq_loc_svc_parse_packet(video_codec_id, packet.data, (size_t)packet.size, FALSE, &layer) < 0) {
-				layer.temporal_id = 0;
-				layer.spatial_id = 0;
-				layer.is_keyframe = kf;
-			} else if(!layer.is_keyframe) {
-				layer.is_keyframe = kf;
-			}
-			if(layer.temporal_id > svc_cfg.max_send_temporal_layer) {
-				IMQUIC_LOG(IMQUIC_LOG_VERB, "Dropping SVC layer T%d (max=%d)\n",
-					layer.temporal_id, svc_cfg.max_send_temporal_layer);
-				av_packet_unref(&packet);
-				continue;
-			}
-		}
-		if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC) {
-			imquic_roq_rtp_packetize_vp9(&video_rtp, packet.data, (size_t)packet.size, target_fps, kf,
-				roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
-		} else if(video_codec_id == DEMO_VP8) {
-			imquic_roq_rtp_packetize_vp8(&video_rtp, packet.data, (size_t)packet.size, target_fps, kf,
-				roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
-		} else {
-			imquic_roq_rtp_packetize_h264_annexb(&video_rtp, packet.data, (size_t)packet.size, target_fps,
-				roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
-		}
-		av_packet_unref(&packet);
+		roq_capture_drain_video_encoder(target_fps);
 	}
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "Leaving video encoding thread\n");
 	return NULL;

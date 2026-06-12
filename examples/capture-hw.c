@@ -542,6 +542,11 @@ void imquic_demo_configure_video_encoder(AVCodecContext *ctx, imquic_demo_video_
 					av_opt_set(ctx->priv_data, "async_depth", "1", AV_OPT_SEARCH_CHILDREN);
 				break;
 			case IMQUIC_DEMO_HW_ROCKCHIP:
+				if(codec == DEMO_H264_AVCC || codec == DEMO_H264_ANNEXB || codec == DEMO_H264_SVC) {
+					ctx->profile = FF_PROFILE_H264_BASELINE;
+					if(imquic_demo_encoder_option_available(ctx, "profile"))
+						av_opt_set(ctx->priv_data, "profile", "baseline", 0);
+				}
 				if(imquic_demo_encoder_option_available(ctx, "rc_mode"))
 					av_opt_set(ctx->priv_data, "rc_mode", "1", 0);
 				g_snprintf(br, sizeof(br), "%d", bitrate);
