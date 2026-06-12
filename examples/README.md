@@ -75,9 +75,42 @@ If the optional A/V dependencies are available, the RoQ sender can also capture 
 
 	./examples/imquic-roq-sender -o -q --capture -A 0 -V 1 -r 127.0.0.1 -R 9000
 
-When capturing, the video codec can be selected via `-e` (e.g., `h264-annexb`, `h264-svc`, `vp9` or `vp9-svc`), and SVC temporal/spatial layers can be configured via `--svc-temporal-layers` and `--svc-spatial-layers`. Adaptive bitrate/framerate/resolution control is enabled by default when capturing, and can be disabled via `--no-adaptive`. When using SVC codecs, the sender can also react to SVC feedback from the receiver to limit which temporal layers are sent.
+When capturing, the video codec can be selected via `-e` (e.g., `h264-annexb`, `h264-svc`, `vp9` or `vp9-svc`), and SVC temporal/spatial layers can be configured via `--svc-temporal-layers` and `--svc-spatial-layers`. Adaptive streaming is enabled by default when capturing non-SVC codecs (see [Adaptive streaming](#adaptive-streaming-loc-and-roq-capture) below); disable it entirely via `--no-adaptive`, or disable individual dimensions via `--no-adaptive-resolution`, `--no-adaptive-bitrate` and `--no-adaptive-framerate`. When using SVC codecs, the sender can also react to SVC feedback from the receiver to limit which temporal layers are sent.
 
 Since both demos can act as both client and server, it's possible to reverse the QUIC roles of this demo. When a sender acts as a server, it will relay RTP packets via RoQ to all the receiver clients that connect.
+
+## Adaptive streaming (LOC and RoQ capture)
+
+When `imquic-roq-sender` captures locally with `--capture`, or `imquic-moq-loc-send` publishes live video, adaptive streaming is enabled by default for non-SVC codecs. SVC codecs (`h264-svc`, `vp9-svc`) use temporal layer selection instead, on both the sender and (optionally) receiver/relay/subscriber side.
+
+**Disable everything**
+
+* MoQ publisher: `-Z` or `--no-adaptive`
+* RoQ sender: `--no-adaptive`
+
+**Disable individual dimensions** (non-SVC only; at least one dimension must remain enabled, or adaptive streaming is not started):
+
+* `--no-adaptive-resolution` — keep the configured capture resolution
+* `--no-adaptive-bitrate` — keep the configured video bitrate
+* `--no-adaptive-framerate` — keep the configured framerate
+
+Example: adapt bitrate and framerate only, leaving resolution fixed:
+
+	./examples/imquic-moq-loc-send -r 127.0.0.1 -R 9000 -w -q -n vc -V demo-video --no-adaptive-resolution
+
+**How non-SVC adaptive streaming works**
+
+The sender periodically evaluates network stress from QUIC path metrics (packet loss, RTT, jitter, congestion window usage, send failures and available pacing bandwidth). Stress maps to one of six quality levels (0 = best, 5 = worst). Each level defines a target resolution, framerate and video bitrate derived from the configured maximum values.
+
+Within the same level, degradation follows a fixed order before resolution drops:
+
+1. lower video bitrate (substep 1)
+2. lower framerate (substep 2)
+3. move to the next level (lower resolution and new bitrate/framerate baselines)
+
+When stress indicates a lower resolution level is needed, the sender can jump directly to that level instead of walking through every substep. Resolution upgrades are delayed: the current level must be stable for a period before a higher resolution is attempted. Bitrate-only changes update the encoder in place; resolution or framerate changes reopen the encoder.
+
+At startup the sender logs which dimensions are adaptive, e.g. `Adapt: resolution=on, bitrate=on, framerate=off`.
 
 ## Media Over QUIC (MoQ) examples
 
@@ -118,7 +151,7 @@ Live audio and/or video can also be tested using `imquic-moq-loc-send` (publishe
 
 	./examples/imquic-moq-loc-send -r 127.0.0.1 -R 9000 -w -q -n vc -A 12345678-audio -V 12345678-video
 
-The publisher supports several video codecs via `-e` (e.g., `h264-avcc`, `h264-annexb`, `h264-svc`, `vp8`, `vp9`, `vp9-svc` and `av1`). When using SVC codecs, temporal and spatial layers can be configured via `-T`/`--svc-temporal-layers` and `--svc-spatial-layers`. Adaptive bitrate/framerate/resolution control is enabled by default, and can be disabled via `-Z`/`--no-adaptive`.
+The publisher supports several video codecs via `-e` (e.g., `h264-avcc`, `h264-annexb`, `h264-svc`, `vp8`, `vp9`, `vp9-svc` and `av1`). When using SVC codecs, temporal and spatial layers can be configured via `-T`/`--svc-temporal-layers` and `--svc-spatial-layers`. For non-SVC codecs, adaptive streaming is enabled by default (see [Adaptive streaming](#adaptive-streaming-loc-and-roq-capture) above); disable it via `-Z`/`--no-adaptive`, or disable resolution, video bitrate or framerate adaptation individually via `--no-adaptive-resolution`, `--no-adaptive-bitrate` and `--no-adaptive-framerate`.
 
 A subscriber for those streams can be created this way instead:
 
