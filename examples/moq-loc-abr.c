@@ -1,7 +1,7 @@
 /*
  * imquic
  *
- * Adaptive bitrate controller for imquic-moq-loc-send
+ * Adaptive bitrate controller for imquic-moq-loc-send and imquic-roq-sender
  *
  */
 
@@ -58,6 +58,17 @@ static void moq_loc_abr_scale_resolution(int max_width, int max_height, double f
 
 	*width = w;
 	*height = h;
+}
+
+void moq_loc_abr_fit_dimensions(int max_width, int max_height, int target_width,
+		int *width, int *height) {
+	double factor = 0.0;
+	if(max_width <= 0 || max_height <= 0 || target_width <= 0 || width == NULL || height == NULL)
+		return;
+	factor = (double)target_width / (double)max_width;
+	if(factor > 1.0)
+		factor = 1.0;
+	moq_loc_abr_scale_resolution(max_width, max_height, factor, 0, width, height);
 }
 
 static void moq_loc_abr_build_ladder(moq_loc_abr *abr) {

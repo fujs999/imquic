@@ -226,11 +226,15 @@ static void roq_capture_apply_abr_video_config(void) {
 	if(generation == applied_enc_generation)
 		return;
 	moq_loc_abr_get_config(abr, &abr_cfg);
-	if(abr_cfg.width != enc_target_width || abr_cfg.height != enc_target_height || abr_cfg.fps != enc_target_fps) {
-		if(roq_capture_open_video_encoder(abr_cfg.width, abr_cfg.height, abr_cfg.fps, abr_cfg.video_bitrate) < 0)
-			return;
-	} else {
-		roq_capture_apply_video_bitrate(abr_cfg.video_bitrate);
+	{
+		int enc_width = 0, enc_height = 0;
+		moq_loc_abr_fit_dimensions(cfg.width, cfg.height, abr_cfg.width, &enc_width, &enc_height);
+		if(enc_width != enc_target_width || enc_height != enc_target_height || abr_cfg.fps != enc_target_fps) {
+			if(roq_capture_open_video_encoder(enc_width, enc_height, abr_cfg.fps, abr_cfg.video_bitrate) < 0)
+				return;
+		} else {
+			roq_capture_apply_video_bitrate(abr_cfg.video_bitrate);
+		}
 	}
 	applied_enc_generation = generation;
 }
@@ -539,24 +543,20 @@ static void *roq_capture_video_capture_thread(void *user_data) {
 			g_usleep(100000);
 			continue;
 		}
-		if(abr != NULL) {
-			moq_loc_abr_config abr_cfg = { 0 };
-			moq_loc_abr_get_config(abr, &abr_cfg);
-			scale_width = abr_cfg.width;
-			scale_height = abr_cfg.height;
-		} else {
-			scale_width = cfg.width;
-			scale_height = cfg.height;
+		{
+			int target_width = cfg.width;
+			if(abr != NULL) {
+				moq_loc_abr_config abr_cfg = { 0 };
+				moq_loc_abr_get_config(abr, &abr_cfg);
+				if(abr_cfg.width > 0)
+					target_width = abr_cfg.width;
+			}
+			/* Keep scaling aligned with the active encoder dimensions */
+			if(enc_target_width > 0)
+				target_width = enc_target_width;
+			moq_loc_abr_fit_dimensions(cfg.width, cfg.height, target_width,
+				&scale_width, &scale_height);
 		}
-		/* Keep scaling aligned with the active encoder dimensions */
-		if(enc_target_width > 0)
-			scale_width = enc_target_width;
-		if(enc_target_height > 0)
-			scale_height = enc_target_height;
-		if(scale_width <= 0)
-			scale_width = cfg.width;
-		if(scale_height <= 0)
-			scale_height = cfg.height;
 		memset(&packet, 0, sizeof(packet));
 		int ret = av_read_frame(webcam_fmt, &packet);
 		if(ret < 0) {

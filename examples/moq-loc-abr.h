@@ -1,7 +1,7 @@
 /*
  * imquic
  *
- * Adaptive bitrate controller for imquic-moq-loc-send
+ * Adaptive bitrate controller for imquic-moq-loc-send and imquic-roq-sender
  *
  */
 
@@ -51,5 +51,8 @@ void moq_loc_abr_get_config(const moq_loc_abr *abr, moq_loc_abr_config *config);
 void moq_loc_abr_get_stats(const moq_loc_abr *abr, moq_loc_abr_stats *stats);
 
 int moq_loc_abr_config_generation(const moq_loc_abr *abr);
+
+void moq_loc_abr_fit_dimensions(int max_width, int max_height, int target_width,
+	int *width, int *height);
 
 #endif
