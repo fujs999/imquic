@@ -124,6 +124,16 @@ static void *imquic_demo_video_capture_thread(void *user_data);
 static void *imquic_demo_video_enc_thread(void *user_data);
 static void *imquic_demo_abr_thread(void *user_data);
 
+static void imquic_demo_clear_latest_frame(void) {
+	imquic_mutex_lock(&mutex);
+	if(latest_frame != NULL) {
+		av_freep(&latest_frame->data[0]);
+		av_frame_free(&latest_frame);
+		latest_frame = NULL;
+	}
+	imquic_mutex_unlock(&mutex);
+}
+
 static void imquic_demo_track_send(gboolean video, int ret, size_t bytes) {
 	imquic_mutex_lock(&send_mutex);
 	if(ret >= 0) {
@@ -284,6 +294,7 @@ static int imquic_demo_open_video_encoder_ctx(int width, int height, int fps, in
 	enc_target_width = width;
 	enc_target_height = height;
 	enc_target_fps = fps;
+	imquic_demo_clear_latest_frame();
 	g_atomic_int_set(&force_video_keyframe, 1);
 	return 0;
 }
@@ -671,16 +682,16 @@ static void *imquic_demo_video_capture_thread(void *user_data) {
 				if(sws != NULL)
 					sws_freeContext(sws);
 				sws = sws_getContext(video_frame->width, video_frame->height, video_frame->format,
-					scale_width, scale_height, AV_PIX_FMT_YUVA420P, SWS_BICUBIC, NULL, NULL, NULL);
+					scale_width, scale_height, AV_PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);
 				last_scale_width = scale_width;
 				last_scale_height = scale_height;
 			}
 			AVFrame *scaled_frame = av_frame_alloc();
 			scaled_frame->width = scale_width;
 			scaled_frame->height = scale_height;
-			scaled_frame->format = AV_PIX_FMT_YUVA420P;
+			scaled_frame->format = AV_PIX_FMT_YUV420P;
 			ret = av_image_alloc(scaled_frame->data, scaled_frame->linesize,
-				scaled_frame->width, scaled_frame->height, AV_PIX_FMT_YUVA420P, 1);
+				scaled_frame->width, scaled_frame->height, AV_PIX_FMT_YUV420P, 1);
 			if(ret < 0) {
 				IMQUIC_LOG(IMQUIC_LOG_ERR, "Error allocating video frame: %d (%s)\n",
 					ret, av_err2str(ret));
@@ -749,6 +760,11 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 			imquic_mutex_unlock(&mutex);
 			continue;
 		}
+		if(latest_frame->width != enc_target_width || latest_frame->height != enc_target_height) {
+			/* Stale frame from before an ABR resolution change */
+			imquic_mutex_unlock(&mutex);
+			continue;
+		}
 		/* Encode the video frame */
 		memset(&packet, 0, sizeof(packet));
 		packet.pts = AV_NOPTS_VALUE;
@@ -765,20 +781,20 @@ static void *imquic_demo_video_enc_thread(void *user_data) {
 		if(ret < 0) {
 			IMQUIC_LOG(IMQUIC_LOG_ERR, "Error encoding video frame: %d (%s)\n",
 				ret, av_err2str(ret));
-		} else {
-			ret = avcodec_receive_packet(videoenc_ctx, &packet);
-			if(ret == AVERROR(EAGAIN)) {
-				/* Encoder needs more input? */
-				IMQUIC_LOG(IMQUIC_LOG_INFO, "Skipping encoding of video frame: %d (%s)\n",
-					ret, av_err2str(ret));
-				video_ts += wait;
-				continue;
-			} else if(ret < 0) {
-				IMQUIC_LOG(IMQUIC_LOG_ERR, "Error encoding video frame: %d (%s)\n",
-					ret, av_err2str(ret));
-				video_ts += wait;
-				continue;
-			}
+			continue;
+		}
+		ret = avcodec_receive_packet(videoenc_ctx, &packet);
+		if(ret == AVERROR(EAGAIN)) {
+			/* Encoder needs more input? */
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "Skipping encoding of video frame: %d (%s)\n",
+				ret, av_err2str(ret));
+			video_ts += wait;
+			continue;
+		} else if(ret < 0) {
+			IMQUIC_LOG(IMQUIC_LOG_ERR, "Error encoding video frame: %d (%s)\n",
+				ret, av_err2str(ret));
+			video_ts += wait;
+			continue;
 		}
 		/* Video frame encoded */
 		gboolean kf = (packet.flags & AV_PKT_FLAG_KEY);
