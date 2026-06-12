@@ -30,6 +30,9 @@ typedef struct demo_options {
 	int audio_bitrate;
 	int video_bitrate;
 	gboolean no_adaptive;
+	gboolean no_adaptive_resolution;
+	gboolean no_adaptive_bitrate;
+	gboolean no_adaptive_framerate;
 	const char *video_codec;
 	int svc_temporal_layers;
 	int svc_spatial_layers;

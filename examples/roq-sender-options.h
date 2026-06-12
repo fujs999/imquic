@@ -56,6 +56,9 @@ typedef struct demo_options {
 	gboolean qlog_roq_packets;
 	gboolean quiet;
 	gboolean no_adaptive;
+	gboolean no_adaptive_resolution;
+	gboolean no_adaptive_bitrate;
+	gboolean no_adaptive_framerate;
 	gboolean debug_ffmpeg;
 	int debug_level;
 	gboolean debug_locks;

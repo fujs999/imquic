@@ -343,14 +343,22 @@ int main(int argc, char *argv[]) {
 				imquic_demo_video_codec_str(video_codec), options.video_bitrate, options.video_pt);
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Video device '%s' (%s)\n", options.video_device, options.video_format);
 		}
-		if(capture_video && !options.no_adaptive && !moq_loc_svc_is_svc_codec(video_codec)) {
+		if(capture_video && !options.no_adaptive && !moq_loc_svc_is_svc_codec(video_codec) &&
+				(!options.no_adaptive_resolution || !options.no_adaptive_bitrate || !options.no_adaptive_framerate)) {
+			gboolean adapt_resolution = !options.no_adaptive_resolution;
+			gboolean adapt_bitrate = !options.no_adaptive_bitrate;
+			gboolean adapt_framerate = !options.no_adaptive_framerate;
 			abr = moq_loc_abr_create(options.width, options.height, options.video_framerate,
 				options.video_bitrate, options.audio_bitrate);
+			moq_loc_abr_set_adapt_flags(abr, adapt_resolution, adapt_bitrate, adapt_framerate);
 			applied_audio_bitrate = options.audio_bitrate;
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "Adaptive streaming enabled (targets: RTT<=150ms, jitter<=50ms, loss<=50%%)\n");
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Max quality: %dx%d@%d, %d bps video, %d bps audio\n",
 				options.width, options.height, options.video_framerate,
 				options.video_bitrate, applied_audio_bitrate);
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- Adapt: resolution=%s, bitrate=%s, framerate=%s\n",
+				adapt_resolution ? "on" : "off", adapt_bitrate ? "on" : "off",
+				adapt_framerate ? "on" : "off");
 		} else if(capture_video && moq_loc_svc_is_svc_codec(video_codec) && !options.no_adaptive) {
 			int temporal_layers = options.svc_temporal_layers > 0 ? options.svc_temporal_layers : 2;
 			svc_abr = moq_loc_svc_abr_create(temporal_layers);

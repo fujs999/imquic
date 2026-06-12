@@ -58,6 +58,9 @@ moq_loc_abr *moq_loc_abr_create(int max_width, int max_height, int max_fps,
 	int max_video_bitrate, int max_audio_bitrate);
 void moq_loc_abr_destroy(moq_loc_abr *abr);
 
+void moq_loc_abr_set_adapt_flags(moq_loc_abr *abr, gboolean resolution,
+	gboolean bitrate, gboolean framerate);
+
 void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
 	uint64_t send_ok, uint64_t send_fail, uint64_t video_bytes_sent);
 

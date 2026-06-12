@@ -31,6 +31,9 @@ struct moq_loc_abr {
 	int res_improve_holdoff;
 	int level_dwell;
 	int level_stable_dwell;
+	gboolean adapt_resolution;
+	gboolean adapt_bitrate;
+	gboolean adapt_framerate;
 };
 
 static int moq_loc_abr_even_dim(int value) {
@@ -110,6 +113,17 @@ static int moq_loc_abr_mid_int(int a, int b) {
 	return (a + b) / 2;
 }
 
+static void moq_loc_abr_clamp_disabled_dims(moq_loc_abr *abr) {
+	if(!abr->adapt_resolution) {
+		abr->active.width = abr->levels[0].width;
+		abr->active.height = abr->levels[0].height;
+	}
+	if(!abr->adapt_framerate)
+		abr->active.fps = abr->levels[0].fps;
+	if(!abr->adapt_bitrate)
+		abr->active.video_bitrate = abr->levels[0].video_bitrate;
+}
+
 static void moq_loc_abr_apply_step(moq_loc_abr *abr, int level, int substep) {
 	const moq_loc_abr_config *base = &abr->levels[level];
 	const moq_loc_abr_config *next = (level < MOQ_LOC_ABR_LEVELS - 1) ?
@@ -123,28 +137,79 @@ static void moq_loc_abr_apply_step(moq_loc_abr *abr, int level, int substep) {
 
 	switch(substep) {
 	case 1:
-		/* Same resolution and fps, lower video bitrate first */
-		abr->active.video_bitrate = moq_loc_abr_mid_int(base->video_bitrate, next->video_bitrate);
+		if(abr->adapt_bitrate)
+			abr->active.video_bitrate = moq_loc_abr_mid_int(base->video_bitrate, next->video_bitrate);
 		break;
 	case 2:
-		/* Same resolution, lower bitrate then fps */
-		abr->active.video_bitrate = moq_loc_abr_mid_int(base->video_bitrate, next->video_bitrate);
-		abr->active.fps = moq_loc_abr_mid_int(base->fps, next->fps);
-		if(abr->active.fps <= 0)
-			abr->active.fps = 1;
+		if(abr->adapt_bitrate)
+			abr->active.video_bitrate = moq_loc_abr_mid_int(base->video_bitrate, next->video_bitrate);
+		if(abr->adapt_framerate) {
+			abr->active.fps = moq_loc_abr_mid_int(base->fps, next->fps);
+			if(abr->active.fps <= 0)
+				abr->active.fps = 1;
+		}
 		break;
 	default:
 		break;
 	}
 
 	if(level == MOQ_LOC_ABR_LEVELS - 1 && substep >= 1) {
-		abr->active.video_bitrate = base->video_bitrate / 2;
-		if(substep == 2) {
+		if(abr->adapt_bitrate)
+			abr->active.video_bitrate = base->video_bitrate / 2;
+		if(substep == 2 && abr->adapt_framerate) {
 			abr->active.fps = base->fps / 2;
 			if(abr->active.fps <= 0)
 				abr->active.fps = 1;
 		}
 	}
+
+	moq_loc_abr_clamp_disabled_dims(abr);
+}
+
+static gboolean moq_loc_abr_substep_effective(const moq_loc_abr *abr, int level, int substep) {
+	if(substep == 0)
+		return TRUE;
+	if(substep == 1)
+		return abr->adapt_bitrate;
+	if(substep == 2)
+		return abr->adapt_bitrate || abr->adapt_framerate;
+	return FALSE;
+}
+
+static int moq_loc_abr_normalize_step(const moq_loc_abr *abr, int step) {
+	int level = 0, substep = 0;
+
+	if(step < 0)
+		return 0;
+	if(step >= MOQ_LOC_ABR_TOTAL_STEPS)
+		step = MOQ_LOC_ABR_TOTAL_STEPS - 1;
+	level = step / MOQ_LOC_ABR_SUBSTEPS;
+	substep = step % MOQ_LOC_ABR_SUBSTEPS;
+	while(substep > 0 && !moq_loc_abr_substep_effective(abr, level, substep))
+		substep--;
+	return level * MOQ_LOC_ABR_SUBSTEPS + substep;
+}
+
+static int moq_loc_abr_next_degrade_step(const moq_loc_abr *abr, int step) {
+	int next = step + 1;
+
+	while(next < MOQ_LOC_ABR_TOTAL_STEPS) {
+		if(moq_loc_abr_substep_effective(abr, next / MOQ_LOC_ABR_SUBSTEPS, next % MOQ_LOC_ABR_SUBSTEPS))
+			return next;
+		next++;
+	}
+	return MOQ_LOC_ABR_TOTAL_STEPS - 1;
+}
+
+static int moq_loc_abr_next_improve_step(const moq_loc_abr *abr, int step) {
+	int next = step - 1;
+
+	while(next >= 0) {
+		if(moq_loc_abr_substep_effective(abr, next / MOQ_LOC_ABR_SUBSTEPS, next % MOQ_LOC_ABR_SUBSTEPS))
+			return next;
+		next--;
+	}
+	return 0;
 }
 
 moq_loc_abr *moq_loc_abr_create(int max_width, int max_height, int max_fps,
@@ -168,7 +233,23 @@ moq_loc_abr *moq_loc_abr_create(int max_width, int max_height, int max_fps,
 	abr->res_improve_holdoff = MOQ_LOC_ABR_RES_IMPROVE_HOLDOFF;
 	abr->level_dwell = MOQ_LOC_ABR_MIN_LEVEL_DWELL;
 	abr->level_stable_dwell = 0;
+	abr->adapt_resolution = TRUE;
+	abr->adapt_bitrate = TRUE;
+	abr->adapt_framerate = TRUE;
 	return abr;
+}
+
+void moq_loc_abr_set_adapt_flags(moq_loc_abr *abr, gboolean resolution,
+		gboolean bitrate, gboolean framerate) {
+	if(abr == NULL)
+		return;
+	imquic_mutex_lock(&abr->mutex);
+	abr->adapt_resolution = resolution;
+	abr->adapt_bitrate = bitrate;
+	abr->adapt_framerate = framerate;
+	moq_loc_abr_apply_step(abr, abr->active_level, abr->active_substep);
+	abr->config_generation++;
+	imquic_mutex_unlock(&abr->mutex);
 }
 
 void moq_loc_abr_destroy(moq_loc_abr *abr) {
@@ -225,7 +306,10 @@ static void moq_loc_abr_set_active_step(moq_loc_abr *abr, int step) {
 		abr->level_stable_dwell = 0;
 }
 
-static gboolean moq_loc_abr_step_raises_resolution(int from_step, int to_step) {
+static gboolean moq_loc_abr_step_raises_resolution(const moq_loc_abr *abr,
+		int from_step, int to_step) {
+	if(!abr->adapt_resolution)
+		return FALSE;
 	return (to_step / MOQ_LOC_ABR_SUBSTEPS) < (from_step / MOQ_LOC_ABR_SUBSTEPS);
 }
 
@@ -302,7 +386,7 @@ void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
 		int dwell_required = MOQ_LOC_ABR_MIN_LEVEL_DWELL;
 
 		if(target_degrade > active_step) {
-			if(target_level > active_level)
+			if(target_level > active_level && abr->adapt_resolution)
 				dwell_required = MOQ_LOC_ABR_RES_DEGRADE_DWELL;
 			else
 				dwell_required = MOQ_LOC_ABR_DEGRADE_DWELL;
@@ -311,12 +395,16 @@ void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
 		if(abr->level_dwell < dwell_required) {
 			abr->level_dwell++;
 		} else if(target_degrade > active_step) {
-			int next_step = active_step + 1;
+			int next_step = moq_loc_abr_next_degrade_step(abr, active_step);
 			int degrade_holdoff = MOQ_LOC_ABR_DEGRADE_HOLDOFF;
+			gboolean res_down = abr->adapt_resolution &&
+				(next_step / MOQ_LOC_ABR_SUBSTEPS) > active_level;
 
 			if(target_level > active_level) {
-				/* Skip bitrate/fps substeps and jump to the target resolution level */
-				next_step = target_degrade;
+				next_step = moq_loc_abr_normalize_step(abr, target_degrade);
+				if(abr->adapt_resolution)
+					degrade_holdoff = MOQ_LOC_ABR_RES_DEGRADE_HOLDOFF;
+			} else if(res_down) {
 				degrade_holdoff = MOQ_LOC_ABR_RES_DEGRADE_HOLDOFF;
 			}
 
@@ -331,8 +419,8 @@ void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
 				config_changed = TRUE;
 			}
 		} else if(target_improve < active_step) {
-			int next_step = active_step - 1;
-			gboolean res_up = moq_loc_abr_step_raises_resolution(active_step, next_step);
+			int next_step = moq_loc_abr_next_improve_step(abr, active_step);
+			gboolean res_up = moq_loc_abr_step_raises_resolution(abr, active_step, next_step);
 
 			if(res_up) {
 				if(abr->level_stable_dwell < MOQ_LOC_ABR_RES_STABLE_DWELL) {
