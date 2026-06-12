@@ -31,6 +31,7 @@ typedef struct imquic_demo_codec_candidate {
 static AVBufferRef *rkmpp_hw_device = NULL;
 static char v4l2_enc_device_override[128] = { 0 };
 static char v4l2_enc_device_detected[128] = { 0 };
+static char pending_v4l2_open_device[128] = { 0 };
 static gboolean v4l2_enc_device_detected_done = FALSE;
 
 static const imquic_demo_codec_candidate h264_encoders[] = {
@@ -276,19 +277,43 @@ enum AVPixelFormat imquic_demo_encoder_pix_fmt(const AVCodecContext *ctx) {
 	return ctx->pix_fmt;
 }
 
+static void imquic_demo_set_v4l2_device_options(AVCodecContext *ctx, const char *device,
+		const char *codec_name) {
+	int ret = 0;
+	if(ctx == NULL || device == NULL || device[0] == '\0')
+		return;
+	ret = av_opt_set(ctx->priv_data, "device", device, AV_OPT_SEARCH_CHILDREN);
+	if(ret < 0)
+		ret = av_opt_set(ctx, "device", device, AV_OPT_SEARCH_CHILDREN);
+	if(ret < 0)
+		ret = av_opt_set(ctx->priv_data, "output_device", device, AV_OPT_SEARCH_CHILDREN);
+	if(ret < 0)
+		ret = av_opt_set(ctx->priv_data, "capture_device", device, AV_OPT_SEARCH_CHILDREN);
+	if(ret < 0) {
+		IMQUIC_LOG(IMQUIC_LOG_WARN,
+			"Could not set V4L2 device '%s' on '%s' via AVOptions (%d), will pass to avcodec_open2\n",
+			device, codec_name, ret);
+	} else {
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "Configured V4L2 device '%s' for '%s'\n",
+			device, codec_name);
+	}
+	g_strlcpy(pending_v4l2_open_device, device, sizeof(pending_v4l2_open_device));
+}
+
 static void imquic_demo_configure_v4l2m2m_encoder(AVCodecContext *ctx, const char *codec_name) {
 	const char *device = NULL;
+	pending_v4l2_open_device[0] = '\0';
 	if(ctx == NULL || !imquic_demo_is_v4l2m2m_codec(codec_name))
 		return;
 	ctx->pix_fmt = AV_PIX_FMT_NV12;
 	device = imquic_demo_resolve_v4l2_encode_device();
 	if(device == NULL)
 		return;
-	if(imquic_demo_encoder_option_available(ctx, "device")) {
-		av_opt_set(ctx->priv_data, "device", device, 0);
-		IMQUIC_LOG(IMQUIC_LOG_INFO, "Using V4L2 M2M encoder device '%s' for '%s'\n",
-			device, codec_name);
+	if(!imquic_demo_v4l2_path_rw(device)) {
+		IMQUIC_LOG(IMQUIC_LOG_WARN, "V4L2 encoder device '%s' is not accessible (check path/permissions)\n",
+			device);
 	}
+	imquic_demo_set_v4l2_device_options(ctx, device, codec_name);
 }
 
 static gboolean imquic_demo_skip_encoder_on_platform(const char *name, imquic_demo_hw_vendor vendor) {
@@ -596,7 +621,13 @@ static void imquic_demo_prepare_video_encoder_ctx(AVCodecContext *ctx, imquic_de
 
 static int imquic_demo_try_open_codec(AVCodecContext **pctx, const AVCodec *codec,
 		imquic_demo_hw_vendor vendor, const char *label) {
-	int ret = avcodec_open2(*pctx, codec, NULL);
+	AVDictionary *open_opts = NULL;
+	int ret = 0;
+	if(pending_v4l2_open_device[0] != '\0')
+		av_dict_set(&open_opts, "device", pending_v4l2_open_device, 0);
+	ret = avcodec_open2(*pctx, codec, &open_opts);
+	av_dict_free(&open_opts);
+	pending_v4l2_open_device[0] = '\0';
 	if(ret < 0) {
 		IMQUIC_LOG(IMQUIC_LOG_WARN, "Video %s '%s' unavailable: %d (%s)\n",
 			label, codec->name, ret, av_err2str(ret));
@@ -658,9 +689,14 @@ int imquic_demo_open_video_encoder(AVCodecContext **pctx, imquic_demo_video_code
 
 	IMQUIC_LOG(IMQUIC_LOG_ERR, "No working video encoder found for codec '%s'\n",
 		imquic_demo_video_codec_str(codec));
-	IMQUIC_LOG(IMQUIC_LOG_ERR,
-		"RK3588 tip: ensure /dev/video-enc0 exists, pass --video-encode-device /dev/video-enc0, "
-		"or build FFmpeg with h264_rkmpp encoder (ffmpeg-rockchip)\n");
+	if(avcodec_find_encoder_by_name("h264_rkmpp") == NULL &&
+			avcodec_find_encoder_by_name("h264_v4l2m2m") != NULL) {
+		IMQUIC_LOG(IMQUIC_LOG_ERR,
+			"RK3588: this FFmpeg has h264_v4l2m2m but not h264_rkmpp encoder; "
+			"v4l2m2m often fails on Rockchip. Install ffmpeg-rockchip "
+			"(https://github.com/nyanmisaka/ffmpeg-rockchip) with --enable-rkmpp, "
+			"then rebuild imquic against it\n");
+	}
 	return -1;
 }
 
