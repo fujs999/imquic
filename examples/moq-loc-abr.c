@@ -80,7 +80,7 @@ void moq_loc_abr_fit_dimensions(int max_width, int max_height, int target_width,
 static void moq_loc_abr_build_ladder(moq_loc_abr *abr) {
 	const double res_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.78, 0.58, 0.42, 0.28, 0.16 };
 	const double fps_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.85, 0.65, 0.45, 0.30, 0.15 };
-	const double vbr_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.50, 0.25, 0.125, 0.0625, 0.03125 };
+	const double vbr_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.70, 0.50, 0.36, 0.25, 0.16 };
 	const double abr_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.75, 0.50, 0.375, 0.25, 0.1875 };
 	const int min_widths[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 320, 320, 160 };
 	const int min_fps[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 0, 5, 2 };
