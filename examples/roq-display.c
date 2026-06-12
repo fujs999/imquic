@@ -39,6 +39,7 @@ typedef struct roq_h264_depay {
 	uint16_t last_seq;
 	uint32_t last_ts;
 	gboolean in_fu;
+	gboolean au_broken;
 } roq_h264_depay;
 
 static roq_display_config cfg = { 0 };
@@ -68,6 +69,7 @@ static SDL_AudioDeviceID audio_dev = 0;
 static AVCodecContext *videodec_ctx = NULL;
 static const AVCodec *video_codec = NULL;
 static gboolean got_keyframe = FALSE;
+static gboolean video_decode_synced = FALSE;
 static AVFrame *latest_frame = NULL;
 static imquic_mutex frame_mutex = IMQUIC_MUTEX_INITIALIZER;
 static uint32_t last_render_tick = 0;
@@ -115,6 +117,20 @@ static const char *roq_display_font_paths[] = {
 static void roq_display_update_stats(uint32_t ticks);
 static void roq_display_update_svc_abr(void);
 static void roq_display_maybe_send_svc_feedback(void);
+static void roq_display_on_video_loss(void);
+static void roq_display_depay_mark_loss(void);
+static void roq_display_reset_depay(void);
+
+static void roq_display_reset_video_decode_sync(void) {
+	video_decode_synced = FALSE;
+}
+
+static void roq_display_on_video_loss(void) {
+	roq_display_reset_video_decode_sync();
+	got_keyframe = FALSE;
+	if(videodec_ctx != NULL)
+		avcodec_flush_buffers(videodec_ctx);
+}
 
 static void roq_display_reset_depay(void) {
 	if(depay.access_unit != NULL)
@@ -122,6 +138,12 @@ static void roq_display_reset_depay(void) {
 	if(depay.fu_buffer != NULL)
 		g_byte_array_set_size(depay.fu_buffer, 0);
 	depay.in_fu = FALSE;
+}
+
+static void roq_display_depay_mark_loss(void) {
+	roq_display_on_video_loss();
+	roq_display_reset_depay();
+	depay.au_broken = TRUE;
 }
 
 static void roq_display_append_nal(GByteArray *au, const uint8_t *nal, size_t nal_len) {
@@ -182,12 +204,21 @@ static gboolean roq_display_depay_h264(const uint8_t *payload, size_t payload_le
 		depay.fu_buffer = g_byte_array_new();
 
 	if(depay.last_ts != timestamp) {
+		if(depay.access_unit != NULL && depay.access_unit->len > 0)
+			roq_display_depay_mark_loss();
 		roq_display_reset_depay();
 		depay.last_ts = timestamp;
+		depay.au_broken = FALSE;
 	} else if((uint16_t)(depay.last_seq + 1) != seq) {
-		roq_display_reset_depay();
+		roq_display_depay_mark_loss();
 	}
 	depay.last_seq = seq;
+
+	if(depay.au_broken) {
+		if(marker)
+			depay.au_broken = FALSE;
+		return TRUE;
+	}
 
 	uint8_t nal_type = payload[0] & 0x1F;
 	if(nal_type >= 1 && nal_type <= 23) {
@@ -632,6 +663,8 @@ static void roq_display_maybe_send_svc_feedback(void) {
 }
 
 static int roq_display_decode_access_unit(uint8_t *buffer, size_t length, gboolean keyframe) {
+	gboolean decoded = FALSE;
+
 	if(videodec_ctx == NULL)
 		return -1;
 	if(!roq_display_svc_within_limits(buffer, length))
@@ -643,6 +676,12 @@ static int roq_display_decode_access_unit(uint8_t *buffer, size_t length, gboole
 		}
 		got_keyframe = TRUE;
 	}
+	if(!video_decode_synced && !keyframe) {
+		IMQUIC_LOG(IMQUIC_LOG_VERB, "Waiting for keyframe after loss, skipping frame\n");
+		return 0;
+	}
+	if(!video_decode_synced && keyframe)
+		avcodec_flush_buffers(videodec_ctx);
 	AVPacket packet = { 0 };
 	av_new_packet(&packet, (int)length);
 	memcpy(packet.data, buffer, length);
@@ -651,8 +690,9 @@ static int roq_display_decode_access_unit(uint8_t *buffer, size_t length, gboole
 	int ret = avcodec_send_packet(videodec_ctx, &packet);
 	av_packet_unref(&packet);
 	if(ret < 0) {
-		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error decoding video frame: %d (%s)\n", ret, av_err2str(ret));
-		return -1;
+		IMQUIC_LOG(IMQUIC_LOG_VERB, "Skipping undecodable video frame: %d (%s)\n", ret, av_err2str(ret));
+		roq_display_on_video_loss();
+		return 0;
 	}
 	while(TRUE) {
 		AVFrame *decoded_frame = av_frame_alloc();
@@ -662,10 +702,19 @@ static int roq_display_decode_access_unit(uint8_t *buffer, size_t length, gboole
 			break;
 		}
 		if(ret < 0) {
-			IMQUIC_LOG(IMQUIC_LOG_ERR, "Error decoding video frame: %d (%s)\n", ret, av_err2str(ret));
+			IMQUIC_LOG(IMQUIC_LOG_VERB, "Skipping undecodable video frame: %d (%s)\n", ret, av_err2str(ret));
 			av_frame_free(&decoded_frame);
-			return -1;
+			roq_display_on_video_loss();
+			return 0;
 		}
+		if(decoded_frame->decode_error_flags != 0) {
+			IMQUIC_LOG(IMQUIC_LOG_VERB, "Skipping corrupt video frame (decode_error_flags=%u)\n",
+				decoded_frame->decode_error_flags);
+			av_frame_free(&decoded_frame);
+			roq_display_on_video_loss();
+			return 0;
+		}
+		decoded = TRUE;
 		imquic_mutex_lock(&frame_mutex);
 		if(latest_frame != NULL)
 			av_frame_free(&latest_frame);
@@ -674,6 +723,10 @@ static int roq_display_decode_access_unit(uint8_t *buffer, size_t length, gboole
 		video_frames_window++;
 		imquic_mutex_unlock(&frame_mutex);
 	}
+	if(keyframe && decoded)
+		video_decode_synced = TRUE;
+	else if(keyframe && !decoded)
+		roq_display_on_video_loss();
 	return 0;
 }
 
@@ -966,6 +1019,8 @@ void roq_display_destroy(void) {
 	if(videodec_ctx != NULL)
 		avcodec_free_context(&videodec_ctx);
 	videodec_ctx = NULL;
+	got_keyframe = FALSE;
+	video_decode_synced = FALSE;
 	if(texture != NULL) {
 		SDL_DestroyTexture(texture);
 		texture = NULL;
