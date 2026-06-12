@@ -60,6 +60,7 @@ static imquic_demo_video_codec video_codec_id = DEMO_H264_ANNEXB;
 static volatile int remote_max_temporal_layer = -1;
 static int applied_enc_generation = 0, applied_audio_bitrate = 0;
 static int enc_target_width = 0, enc_target_height = 0, enc_target_fps = 0;
+static enum AVPixelFormat enc_target_pix_fmt = AV_PIX_FMT_YUV420P;
 static imquic_demo_hw_vendor video_enc_vendor = IMQUIC_DEMO_HW_NONE;
 static volatile int force_video_keyframe = 0;
 
@@ -148,6 +149,7 @@ static int roq_capture_open_video_encoder(int width, int height, int fps, int bi
 			roq_capture_svc_encoder_extra_config, NULL, &video_codec, &video_enc_vendor) < 0) {
 		return -1;
 	}
+	enc_target_pix_fmt = imquic_demo_encoder_pix_fmt(videoenc_ctx);
 	enc_target_width = width;
 	enc_target_height = height;
 	enc_target_fps = fps;
@@ -303,6 +305,8 @@ int roq_capture_init(const roq_capture_config *config, roq_capture_rtp_cb cb, vo
 	if(!config->capture_audio && !config->capture_video)
 		return -1;
 	memcpy(&cfg, config, sizeof(cfg));
+	if(cfg.video_encode_device != NULL)
+		imquic_demo_set_v4l2_encode_device(cfg.video_encode_device);
 	rtp_out_cb = cb;
 	rtp_out_user_data = user_data;
 	capture_stop = 0;
@@ -517,12 +521,12 @@ static void *roq_capture_video_capture_thread(void *user_data) {
 				if(sws != NULL)
 					sws_freeContext(sws);
 				sws = sws_getContext(decode_frame->width, decode_frame->height, decode_frame->format,
-					scale_width, scale_height, AV_PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);
+					scale_width, scale_height, enc_target_pix_fmt, SWS_BICUBIC, NULL, NULL, NULL);
 				last_scale_width = scale_width;
 				last_scale_height = scale_height;
 			}
 			AVFrame *scaled_frame = av_frame_alloc();
-			scaled_frame->format = AV_PIX_FMT_YUV420P;
+			scaled_frame->format = enc_target_pix_fmt;
 			scaled_frame->width = scale_width;
 			scaled_frame->height = scale_height;
 			ret = av_frame_get_buffer(scaled_frame, 32);

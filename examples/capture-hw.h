@@ -73,4 +73,9 @@ int imquic_demo_prepare_sw_decode_frame(AVFrame *src, AVFrame *sw_frame, AVFrame
 
 void imquic_demo_capture_hw_deinit(void);
 
+/* Optional V4L2 M2M encoder node (e.g. /dev/video-enc0 on RK3588). NULL enables autodetect. */
+void imquic_demo_set_v4l2_encode_device(const char *device);
+
+enum AVPixelFormat imquic_demo_encoder_pix_fmt(const AVCodecContext *ctx);
+
 #endif

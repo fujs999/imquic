@@ -22,6 +22,7 @@ gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
 		{ "video-track-name", 'V', 0, G_OPTION_ARG_STRING, &options->video_track_name, "MoQ track name of the video track to publish (default=no video)", "name" },
 		{ "video-format", 'f', 0, G_OPTION_ARG_STRING, &options->video_format, "Video format to use as, using FFmpeg names (default=v4l2)", "format" },
 		{ "video-device", 'i', 0, G_OPTION_ARG_STRING, &options->video_device, "Video device to capture from (default=/dev/video0)", "device" },
+		{ "video-encode-device", 0, 0, G_OPTION_ARG_STRING, &options->video_encode_device, "V4L2 M2M encoder device for hardware encoding (RK3588: /dev/video-enc0)", "device" },
 		{ "video-resolution", 'W', 0, G_OPTION_ARG_STRING, &options->video_resolution, "Video resolution to capture (default=640x480)", "resolution" },
 		{ "video-framerate", 'F', 0, G_OPTION_ARG_INT, &options->video_framerate, "Video framerate to capture at, in frames per second (default=25)", "fps" },
 		{ "audio-bitrate", 'a', 0, G_OPTION_ARG_INT, &options->audio_bitrate, "Audio encoding bitrate, in bits per second (default=32000)", "bps" },

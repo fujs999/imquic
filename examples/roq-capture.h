@@ -34,6 +34,7 @@ typedef struct roq_capture_config {
 	int svc_spatial_layers;
 	const char *video_format;
 	const char *video_device;
+	const char *video_encode_device;
 	const char *video_resolution;
 	uint8_t video_pt;
 	gboolean debug_ffmpeg;

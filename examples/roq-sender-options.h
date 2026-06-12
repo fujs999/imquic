@@ -29,6 +29,7 @@ typedef struct demo_options {
 	int video_framerate;
 	const char *video_format;
 	const char *video_device;
+	const char *video_encode_device;
 	const char *video_resolution;
 	const char *video_codec;
 	int svc_temporal_layers;

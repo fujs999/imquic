@@ -497,6 +497,7 @@ int main(int argc, char *argv[]) {
 			.svc_spatial_layers = options.svc_spatial_layers,
 			.video_format = options.video_format,
 			.video_device = options.video_device,
+			.video_encode_device = options.video_encode_device,
 			.video_resolution = options.video_resolution,
 			.video_pt = (uint8_t)options.video_pt,
 			.debug_ffmpeg = options.debug_ffmpeg

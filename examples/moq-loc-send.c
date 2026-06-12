@@ -118,6 +118,7 @@ static moq_loc_svc_config svc_cfg = { 0 };
 static uint64_t send_ok_count = 0, send_fail_count = 0, video_bytes_sent = 0;
 static int applied_enc_generation = 0, applied_audio_bitrate = 0;
 static int enc_target_width = 0, enc_target_height = 0, enc_target_fps = 0;
+static enum AVPixelFormat enc_target_pix_fmt = AV_PIX_FMT_YUV420P;
 static imquic_demo_hw_vendor video_enc_vendor = IMQUIC_DEMO_HW_NONE;
 static volatile int force_video_keyframe = 0;
 
@@ -240,6 +241,7 @@ static int imquic_demo_open_video_encoder_ctx(int width, int height, int fps, in
 			imquic_demo_svc_encoder_extra_config, NULL, &video_codec, &video_enc_vendor) < 0) {
 		return -1;
 	}
+	enc_target_pix_fmt = imquic_demo_encoder_pix_fmt(videoenc_ctx);
 	enc_target_width = width;
 	enc_target_height = height;
 	enc_target_fps = fps;
@@ -619,16 +621,16 @@ static void *imquic_demo_video_capture_thread(void *user_data) {
 				if(sws != NULL)
 					sws_freeContext(sws);
 				sws = sws_getContext(decode_frame->width, decode_frame->height, decode_frame->format,
-					scale_width, scale_height, AV_PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);
+					scale_width, scale_height, enc_target_pix_fmt, SWS_BICUBIC, NULL, NULL, NULL);
 				last_scale_width = scale_width;
 				last_scale_height = scale_height;
 			}
 			AVFrame *scaled_frame = av_frame_alloc();
 			scaled_frame->width = scale_width;
 			scaled_frame->height = scale_height;
-			scaled_frame->format = AV_PIX_FMT_YUV420P;
+			scaled_frame->format = enc_target_pix_fmt;
 			ret = av_image_alloc(scaled_frame->data, scaled_frame->linesize,
-				scaled_frame->width, scaled_frame->height, AV_PIX_FMT_YUV420P, 1);
+				scaled_frame->width, scaled_frame->height, enc_target_pix_fmt, 1);
 			if(ret < 0) {
 				IMQUIC_LOG(IMQUIC_LOG_ERR, "Error allocating video frame: %d (%s)\n",
 					ret, av_err2str(ret));
@@ -1425,6 +1427,8 @@ int main(int argc, char *argv[]) {
 	}
 
 	/* Create encoders */
+	if(options.video_encode_device != NULL)
+		imquic_demo_set_v4l2_encode_device(options.video_encode_device);
 	if(options.audio_track_name != NULL && imquic_demo_create_audio_encoder() < 0) {
 		g_atomic_int_set(&stop, 1);
 		goto done;

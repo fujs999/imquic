@@ -7,10 +7,18 @@
 
 #include <imquic/imquic.h>
 
+#include <unistd.h>
+
 #include <libavutil/hwcontext.h>
 #include <libavutil/opt.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+
+#ifdef __linux__
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/videodev2.h>
+#endif
 
 #include "capture-hw.h"
 #include "moq-loc-svc.h"
@@ -21,6 +29,9 @@ typedef struct imquic_demo_codec_candidate {
 } imquic_demo_codec_candidate;
 
 static AVBufferRef *rkmpp_hw_device = NULL;
+static char v4l2_enc_device_override[128] = { 0 };
+static char v4l2_enc_device_detected[128] = { 0 };
+static gboolean v4l2_enc_device_detected_done = FALSE;
 
 static const imquic_demo_codec_candidate h264_encoders[] = {
 	{ "h264_rkmpp", IMQUIC_DEMO_HW_ROCKCHIP },
@@ -64,9 +75,7 @@ static const imquic_demo_codec_candidate av1_encoders[] = {
 };
 
 static const imquic_demo_codec_candidate mjpeg_decoders[] = {
-	{ "mjpeg_rkmpp", IMQUIC_DEMO_HW_ROCKCHIP },
 	{ "mjpeg_v4l2m2m", IMQUIC_DEMO_HW_ROCKCHIP },
-	{ "mjpeg_qsv", IMQUIC_DEMO_HW_INTEL },
 	{ "mjpeg", IMQUIC_DEMO_HW_SOFTWARE },
 	{ NULL, IMQUIC_DEMO_HW_NONE }
 };
@@ -155,6 +164,148 @@ static gboolean imquic_demo_is_rkmpp_codec(const char *name) {
 	return name != NULL && g_str_has_suffix(name, "_rkmpp");
 }
 
+static gboolean imquic_demo_is_v4l2m2m_codec(const char *name) {
+	return name != NULL && g_str_has_suffix(name, "_v4l2m2m");
+}
+
+static gboolean imquic_demo_encoder_option_available(AVCodecContext *ctx, const char *name) {
+	if(ctx == NULL || ctx->priv_data == NULL || name == NULL)
+		return FALSE;
+	return av_opt_find(ctx->priv_data, name, NULL, 0, AV_OPT_SEARCH_CHILDREN) != NULL;
+}
+
+static gboolean imquic_demo_v4l2_path_rw(const char *path) {
+	if(path == NULL || path[0] == '\0')
+		return FALSE;
+	return g_file_test(path, G_FILE_TEST_EXISTS) && access(path, R_OK | W_OK) == 0;
+}
+
+#ifdef __linux__
+static gboolean imquic_demo_v4l2_is_m2m_device(int fd) {
+	struct v4l2_capability cap = { 0 };
+	if(ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0)
+		return FALSE;
+	return (cap.capabilities & V4L2_CAP_VIDEO_M2M_MPLANE) ||
+		(cap.capabilities & V4L2_CAP_VIDEO_M2M);
+}
+
+static gboolean imquic_demo_v4l2_probe_encoder_device(const char *path) {
+	int fd = open(path, O_RDWR | O_NONBLOCK, 0);
+	gboolean ok = FALSE;
+	if(fd < 0)
+		return FALSE;
+	if(!imquic_demo_v4l2_is_m2m_device(fd)) {
+		close(fd);
+		return FALSE;
+	}
+	ok = TRUE;
+	close(fd);
+	return ok;
+}
+#endif
+
+static const char *imquic_demo_detect_v4l2_encode_device(void) {
+	static const char *preferred[] = {
+		"/dev/video-enc0",
+		"/dev/video-enc1",
+		NULL
+	};
+	char path[32] = { 0 };
+	int i = 0;
+
+	if(v4l2_enc_device_detected_done)
+		return v4l2_enc_device_detected[0] != '\0' ? v4l2_enc_device_detected : NULL;
+	v4l2_enc_device_detected_done = TRUE;
+
+	for(i = 0; preferred[i] != NULL; i++) {
+		if(!imquic_demo_v4l2_path_rw(preferred[i]))
+			continue;
+#ifdef __linux__
+		if(!imquic_demo_v4l2_probe_encoder_device(preferred[i]))
+			continue;
+#endif
+		g_strlcpy(v4l2_enc_device_detected, preferred[i], sizeof(v4l2_enc_device_detected));
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "Autodetected V4L2 M2M encoder device '%s'\n",
+			v4l2_enc_device_detected);
+		return v4l2_enc_device_detected;
+	}
+
+#ifdef __linux__
+	for(i = 0; i < 64; i++) {
+		g_snprintf(path, sizeof(path), "/dev/video%d", i);
+		if(!imquic_demo_v4l2_path_rw(path))
+			continue;
+		if(!imquic_demo_v4l2_probe_encoder_device(path))
+			continue;
+		/* Skip typical camera nodes when another enc node exists */
+		g_strlcpy(v4l2_enc_device_detected, path, sizeof(v4l2_enc_device_detected));
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "Autodetected V4L2 M2M encoder device '%s'\n",
+			v4l2_enc_device_detected);
+		return v4l2_enc_device_detected;
+	}
+#endif
+
+	IMQUIC_LOG(IMQUIC_LOG_WARN,
+		"No V4L2 M2M encoder device autodetected (RK3588: try --video-encode-device /dev/video-enc0)\n");
+	return NULL;
+}
+
+static const char *imquic_demo_resolve_v4l2_encode_device(void) {
+	const char *env = NULL;
+	if(v4l2_enc_device_override[0] != '\0')
+		return v4l2_enc_device_override;
+	env = g_getenv("IMQUIC_V4L2_ENC_DEVICE");
+	if(env != NULL && env[0] != '\0')
+		return env;
+	return imquic_demo_detect_v4l2_encode_device();
+}
+
+void imquic_demo_set_v4l2_encode_device(const char *device) {
+	v4l2_enc_device_detected_done = FALSE;
+	v4l2_enc_device_detected[0] = '\0';
+	if(device == NULL || device[0] == '\0') {
+		v4l2_enc_device_override[0] = '\0';
+		return;
+	}
+	g_strlcpy(v4l2_enc_device_override, device, sizeof(v4l2_enc_device_override));
+}
+
+enum AVPixelFormat imquic_demo_encoder_pix_fmt(const AVCodecContext *ctx) {
+	if(ctx == NULL)
+		return AV_PIX_FMT_YUV420P;
+	return ctx->pix_fmt;
+}
+
+static void imquic_demo_configure_v4l2m2m_encoder(AVCodecContext *ctx, const char *codec_name) {
+	const char *device = NULL;
+	if(ctx == NULL || !imquic_demo_is_v4l2m2m_codec(codec_name))
+		return;
+	ctx->pix_fmt = AV_PIX_FMT_NV12;
+	device = imquic_demo_resolve_v4l2_encode_device();
+	if(device == NULL)
+		return;
+	if(imquic_demo_encoder_option_available(ctx, "device")) {
+		av_opt_set(ctx->priv_data, "device", device, 0);
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "Using V4L2 M2M encoder device '%s' for '%s'\n",
+			device, codec_name);
+	}
+}
+
+static gboolean imquic_demo_skip_encoder_on_platform(const char *name, imquic_demo_hw_vendor vendor) {
+#if defined(__aarch64__) || defined(__arm__)
+	if(vendor == IMQUIC_DEMO_HW_NVIDIA)
+		return TRUE;
+	if(vendor == IMQUIC_DEMO_HW_INTEL && name != NULL &&
+			(g_str_has_suffix(name, "_vaapi") || g_str_has_suffix(name, "_qsv")))
+		return TRUE;
+	return FALSE;
+#else
+	(void)name;
+	(void)vendor;
+	return FALSE;
+#endif
+}
+
 static int imquic_demo_ensure_rkmpp_device(void) {
 	enum AVHWDeviceType type;
 	int ret = 0;
@@ -186,6 +337,8 @@ static void imquic_demo_attach_rkmpp_device(AVCodecContext *ctx, const char *cod
 
 void imquic_demo_capture_hw_deinit(void) {
 	av_buffer_unref(&rkmpp_hw_device);
+	v4l2_enc_device_detected_done = FALSE;
+	v4l2_enc_device_detected[0] = '\0';
 }
 
 const char *imquic_demo_hw_vendor_str(imquic_demo_hw_vendor vendor) {
@@ -310,12 +463,6 @@ int imquic_demo_open_v4l2_capture(const char *device, const char *v4l2_format,
 	return -1;
 }
 
-static gboolean imquic_demo_encoder_option_available(AVCodecContext *ctx, const char *name) {
-	if(ctx == NULL || ctx->priv_data == NULL || name == NULL)
-		return FALSE;
-	return av_opt_find(ctx->priv_data, name, NULL, 0, AV_OPT_SEARCH_CHILDREN) != NULL;
-}
-
 static gboolean imquic_demo_is_hw_pix_fmt(enum AVPixelFormat fmt) {
 	return fmt == AV_PIX_FMT_DRM_PRIME || fmt == AV_PIX_FMT_VAAPI ||
 		fmt == AV_PIX_FMT_CUDA || fmt == AV_PIX_FMT_QSV;
@@ -435,7 +582,9 @@ static void imquic_demo_prepare_video_encoder_ctx(AVCodecContext *ctx, imquic_de
 	ctx->framerate = (AVRational){ fps, 1 };
 	ctx->gop_size = fps * 2;
 	ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-	if(codec_name != NULL && g_str_has_suffix(codec_name, "_vaapi"))
+	if(codec_name != NULL && imquic_demo_is_v4l2m2m_codec(codec_name))
+		ctx->pix_fmt = AV_PIX_FMT_NV12;
+	else if(codec_name != NULL && g_str_has_suffix(codec_name, "_vaapi"))
 		ctx->pix_fmt = AV_PIX_FMT_VAAPI;
 	if(global_header)
 		ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
@@ -486,10 +635,13 @@ int imquic_demo_open_video_encoder(AVCodecContext **pctx, imquic_demo_video_code
 			IMQUIC_LOG(IMQUIC_LOG_VERB, "Video encoder '%s' not available in this FFmpeg build\n", name);
 			continue;
 		}
+		if(imquic_demo_skip_encoder_on_platform(name, try_vendor))
+			continue;
 		ctx = avcodec_alloc_context3(try_codec);
 		if(ctx == NULL)
 			continue;
 		imquic_demo_prepare_video_encoder_ctx(ctx, codec, name, width, height, fps, bitrate, global_header);
+		imquic_demo_configure_v4l2m2m_encoder(ctx, name);
 		imquic_demo_attach_rkmpp_device(ctx, name);
 		imquic_demo_configure_video_encoder(ctx, codec, try_vendor, bitrate, fps);
 		if(extra_config != NULL)
@@ -506,6 +658,9 @@ int imquic_demo_open_video_encoder(AVCodecContext **pctx, imquic_demo_video_code
 
 	IMQUIC_LOG(IMQUIC_LOG_ERR, "No working video encoder found for codec '%s'\n",
 		imquic_demo_video_codec_str(codec));
+	IMQUIC_LOG(IMQUIC_LOG_ERR,
+		"RK3588 tip: ensure /dev/video-enc0 exists, pass --video-encode-device /dev/video-enc0, "
+		"or build FFmpeg with h264_rkmpp encoder (ffmpeg-rockchip)\n");
 	return -1;
 }
 

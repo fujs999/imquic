@@ -21,6 +21,7 @@ gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
 		{ "video-bitrate", 'E', 0, G_OPTION_ARG_INT, &options->video_bitrate, "When capturing, video encoding bitrate in bits per second (default=1048576)", "bps" },
 		{ "video-format", 'f', 0, G_OPTION_ARG_STRING, &options->video_format, "When capturing, video input format using FFmpeg names (default=v4l2)", "format" },
 		{ "video-device", 'i', 0, G_OPTION_ARG_STRING, &options->video_device, "When capturing, video device to capture from (default=/dev/video0)", "device" },
+		{ "video-encode-device", 0, 0, G_OPTION_ARG_STRING, &options->video_encode_device, "When capturing, V4L2 M2M encoder device (RK3588: /dev/video-enc0)", "device" },
 		{ "video-resolution", 'W', 0, G_OPTION_ARG_STRING, &options->video_resolution, "When capturing, video resolution to capture (default=640x480)", "resolution" },
 		{ "video-framerate", 'F', 0, G_OPTION_ARG_INT, &options->video_framerate, "When capturing, video framerate in frames per second (default=25)", "fps" },
 		{ "video-codec", 'e', 0, G_OPTION_ARG_STRING, &options->video_codec, "When capturing, video codec to use (default=h264-annexb)", "h264-annexb|h264-svc|vp9|vp9-svc" },
