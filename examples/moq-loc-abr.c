@@ -20,6 +20,7 @@ struct moq_loc_abr {
 	moq_loc_abr_stats stats;
 	imquic_mutex mutex;
 	int active_level;
+	int active_substep;
 	int config_generation;
 	uint64_t prev_packets_sent;
 	uint64_t prev_packets_lost;
@@ -101,7 +102,47 @@ static void moq_loc_abr_build_ladder(moq_loc_abr *abr) {
 		if(level->audio_bitrate < min_abr[i])
 			level->audio_bitrate = min_abr[i];
 	}
-	abr->active = abr->levels[0];
+}
+
+static int moq_loc_abr_mid_int(int a, int b) {
+	return (a + b) / 2;
+}
+
+static void moq_loc_abr_apply_step(moq_loc_abr *abr, int level, int substep) {
+	const moq_loc_abr_config *base = &abr->levels[level];
+	const moq_loc_abr_config *next = (level < MOQ_LOC_ABR_LEVELS - 1) ?
+		&abr->levels[level + 1] : base;
+
+	abr->active.width = base->width;
+	abr->active.height = base->height;
+	abr->active.audio_bitrate = base->audio_bitrate;
+	abr->active.fps = base->fps;
+	abr->active.video_bitrate = base->video_bitrate;
+
+	switch(substep) {
+	case 1:
+		/* Same resolution and fps, lower video bitrate first */
+		abr->active.video_bitrate = moq_loc_abr_mid_int(base->video_bitrate, next->video_bitrate);
+		break;
+	case 2:
+		/* Same resolution, lower bitrate then fps */
+		abr->active.video_bitrate = moq_loc_abr_mid_int(base->video_bitrate, next->video_bitrate);
+		abr->active.fps = moq_loc_abr_mid_int(base->fps, next->fps);
+		if(abr->active.fps <= 0)
+			abr->active.fps = 1;
+		break;
+	default:
+		break;
+	}
+
+	if(level == MOQ_LOC_ABR_LEVELS - 1 && substep >= 1) {
+		abr->active.video_bitrate = base->video_bitrate / 2;
+		if(substep == 2) {
+			abr->active.fps = base->fps / 2;
+			if(abr->active.fps <= 0)
+				abr->active.fps = 1;
+		}
+	}
 }
 
 moq_loc_abr *moq_loc_abr_create(int max_width, int max_height, int max_fps,
@@ -115,8 +156,11 @@ moq_loc_abr *moq_loc_abr_create(int max_width, int max_height, int max_fps,
 	imquic_mutex_init(&abr->mutex);
 	moq_loc_abr_build_ladder(abr);
 	abr->active_level = 0;
+	abr->active_substep = 0;
+	moq_loc_abr_apply_step(abr, 0, 0);
 	abr->config_generation = 1;
 	abr->stats.level = 0;
+	abr->stats.substep = 0;
 	abr->improve_holdoff = MOQ_LOC_ABR_IMPROVE_HOLDOFF;
 	abr->degrade_holdoff = MOQ_LOC_ABR_DEGRADE_HOLDOFF;
 	abr->level_dwell = MOQ_LOC_ABR_MIN_LEVEL_DWELL;
@@ -138,20 +182,39 @@ static double moq_loc_abr_clamp01(double value) {
 	return value;
 }
 
-static int moq_loc_abr_stress_to_level(double stress, double margin, gboolean worsen) {
-	const double thresholds[MOQ_LOC_ABR_LEVELS - 1] = { 0.12, 0.28, 0.42, 0.58, 0.74 };
-	int level = 0;
+static int moq_loc_abr_stress_to_step(double stress, double margin, gboolean worsen) {
+	const double level_ends[MOQ_LOC_ABR_LEVELS] = { 0.12, 0.28, 0.42, 0.58, 0.74, 1.0 };
+	const double level_starts[MOQ_LOC_ABR_LEVELS] = { 0.0, 0.12, 0.28, 0.42, 0.58, 0.74 };
+	int level = 0, substep = 0;
 
-	for(level = 0; level < (MOQ_LOC_ABR_LEVELS - 1); level++) {
-		double threshold = thresholds[level];
-		if(worsen)
-			threshold += margin;
-		else
-			threshold -= margin;
-		if(stress < threshold)
-			return level;
+	for(level = 0; level < MOQ_LOC_ABR_LEVELS; level++) {
+		double span = level_ends[level] - level_starts[level];
+		for(substep = 0; substep < MOQ_LOC_ABR_SUBSTEPS; substep++) {
+			double threshold = level_starts[level] +
+				span * (double)(substep + 1) / (double)MOQ_LOC_ABR_SUBSTEPS;
+			if(worsen)
+				threshold += margin / (double)MOQ_LOC_ABR_SUBSTEPS;
+			else
+				threshold -= margin / (double)MOQ_LOC_ABR_SUBSTEPS;
+			if(stress < threshold)
+				return level * MOQ_LOC_ABR_SUBSTEPS + substep;
+		}
 	}
-	return MOQ_LOC_ABR_LEVELS - 1;
+	return MOQ_LOC_ABR_TOTAL_STEPS - 1;
+}
+
+static int moq_loc_abr_active_step(const moq_loc_abr *abr) {
+	return abr->active_level * MOQ_LOC_ABR_SUBSTEPS + abr->active_substep;
+}
+
+static void moq_loc_abr_set_active_step(moq_loc_abr *abr, int step) {
+	if(step < 0)
+		step = 0;
+	if(step >= MOQ_LOC_ABR_TOTAL_STEPS)
+		step = MOQ_LOC_ABR_TOTAL_STEPS - 1;
+	abr->active_level = step / MOQ_LOC_ABR_SUBSTEPS;
+	abr->active_substep = step % MOQ_LOC_ABR_SUBSTEPS;
+	moq_loc_abr_apply_step(abr, abr->active_level, abr->active_substep);
 }
 
 void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
@@ -211,24 +274,25 @@ void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
 	if(abr->level_dwell < MOQ_LOC_ABR_MIN_LEVEL_DWELL) {
 		abr->level_dwell++;
 	} else {
-		int target_improve = moq_loc_abr_stress_to_level(stress, MOQ_LOC_ABR_STRESS_HYSTERESIS, FALSE);
-		int target_degrade = moq_loc_abr_stress_to_level(stress, MOQ_LOC_ABR_STRESS_HYSTERESIS, TRUE);
+		int active_step = moq_loc_abr_active_step(abr);
+		int target_improve = moq_loc_abr_stress_to_step(stress, MOQ_LOC_ABR_STRESS_HYSTERESIS, FALSE);
+		int target_degrade = moq_loc_abr_stress_to_step(stress, MOQ_LOC_ABR_STRESS_HYSTERESIS, TRUE);
 
-		if(target_degrade > abr->active_level) {
+		if(target_degrade > active_step) {
 			if(abr->degrade_holdoff > 0) {
 				abr->degrade_holdoff--;
 			} else {
-				abr->active_level++;
+				moq_loc_abr_set_active_step(abr, active_step + 1);
 				abr->degrade_holdoff = MOQ_LOC_ABR_DEGRADE_HOLDOFF;
 				abr->improve_holdoff = MOQ_LOC_ABR_IMPROVE_HOLDOFF;
 				abr->level_dwell = 0;
 				config_changed = TRUE;
 			}
-		} else if(target_improve < abr->active_level) {
+		} else if(target_improve < active_step) {
 			if(abr->improve_holdoff > 0) {
 				abr->improve_holdoff--;
 			} else {
-				abr->active_level--;
+				moq_loc_abr_set_active_step(abr, active_step - 1);
 				abr->improve_holdoff = MOQ_LOC_ABR_IMPROVE_HOLDOFF;
 				abr->degrade_holdoff = MOQ_LOC_ABR_DEGRADE_HOLDOFF;
 				abr->level_dwell = 0;
@@ -247,13 +311,13 @@ void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
 	abr->stats.jitter_us = pq.rtt_jitter_us;
 	abr->stats.pacing_rate_bps = pq.pacing_rate_bps;
 	abr->stats.level = abr->active_level;
+	abr->stats.substep = abr->active_substep;
 
 	if(config_changed) {
-		abr->active = abr->levels[abr->active_level];
 		abr->config_generation++;
 		IMQUIC_LOG(IMQUIC_LOG_INFO,
-			"ABR level %d (stress=%.2f, loss=%.1f%%, RTT=%"SCNu64"ms, jitter=%"SCNu64"ms): %dx%d@%dfps, video=%dbps, audio=%dbps\n",
-			abr->active_level, stress, loss_rate * 100.0,
+			"ABR level %d.%d (stress=%.2f, loss=%.1f%%, RTT=%"SCNu64"ms, jitter=%"SCNu64"ms): %dx%d@%dfps, video=%dbps, audio=%dbps\n",
+			abr->active_level, abr->active_substep, stress, loss_rate * 100.0,
 			pq.rtt_us / 1000, pq.rtt_jitter_us / 1000,
 			abr->active.width, abr->active.height, abr->active.fps,
 			abr->active.video_bitrate, abr->active.audio_bitrate);

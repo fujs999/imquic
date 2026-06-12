@@ -13,7 +13,9 @@
 #include <glib.h>
 #include <imquic/imquic.h>
 
-#define MOQ_LOC_ABR_LEVELS 6
+#define MOQ_LOC_ABR_LEVELS    6
+#define MOQ_LOC_ABR_SUBSTEPS  3
+#define MOQ_LOC_ABR_TOTAL_STEPS (MOQ_LOC_ABR_LEVELS * MOQ_LOC_ABR_SUBSTEPS)
 
 /* Target network limits (microseconds for RTT/jitter) */
 #define MOQ_LOC_ABR_RTT_TARGET_US     150000
@@ -41,6 +43,7 @@ typedef struct moq_loc_abr_stats {
 	uint64_t jitter_us;
 	uint64_t pacing_rate_bps;
 	int level;
+	int substep;
 	int upgrade_holdoff;
 } moq_loc_abr_stats;
 
