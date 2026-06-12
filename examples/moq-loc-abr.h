@@ -23,10 +23,14 @@
 #define MOQ_LOC_ABR_LOSS_TARGET       0.50
 
 /* ABR switching hysteresis (500ms update interval) */
-#define MOQ_LOC_ABR_IMPROVE_HOLDOFF   1
-#define MOQ_LOC_ABR_DEGRADE_HOLDOFF   1
-#define MOQ_LOC_ABR_MIN_LEVEL_DWELL   1
-#define MOQ_LOC_ABR_STRESS_HYSTERESIS 0.01
+#define MOQ_LOC_ABR_IMPROVE_HOLDOFF        6
+#define MOQ_LOC_ABR_DEGRADE_HOLDOFF        1
+#define MOQ_LOC_ABR_RES_DEGRADE_HOLDOFF     0
+#define MOQ_LOC_ABR_RES_IMPROVE_HOLDOFF     24
+#define MOQ_LOC_ABR_RES_STABLE_DWELL       20
+#define MOQ_LOC_ABR_MIN_LEVEL_DWELL        4
+#define MOQ_LOC_ABR_DEGRADE_DWELL           1
+#define MOQ_LOC_ABR_STRESS_HYSTERESIS      0.04
 
 typedef struct moq_loc_abr_config {
 	int width;

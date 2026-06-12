@@ -28,7 +28,9 @@ struct moq_loc_abr {
 	uint64_t prev_send_fail;
 	int improve_holdoff;
 	int degrade_holdoff;
+	int res_improve_holdoff;
 	int level_dwell;
+	int level_stable_dwell;
 };
 
 static int moq_loc_abr_even_dim(int value) {
@@ -163,7 +165,9 @@ moq_loc_abr *moq_loc_abr_create(int max_width, int max_height, int max_fps,
 	abr->stats.substep = 0;
 	abr->improve_holdoff = MOQ_LOC_ABR_IMPROVE_HOLDOFF;
 	abr->degrade_holdoff = MOQ_LOC_ABR_DEGRADE_HOLDOFF;
+	abr->res_improve_holdoff = MOQ_LOC_ABR_RES_IMPROVE_HOLDOFF;
 	abr->level_dwell = MOQ_LOC_ABR_MIN_LEVEL_DWELL;
+	abr->level_stable_dwell = 0;
 	return abr;
 }
 
@@ -208,13 +212,25 @@ static int moq_loc_abr_active_step(const moq_loc_abr *abr) {
 }
 
 static void moq_loc_abr_set_active_step(moq_loc_abr *abr, int step) {
+	int prev_level = 0;
 	if(step < 0)
 		step = 0;
 	if(step >= MOQ_LOC_ABR_TOTAL_STEPS)
 		step = MOQ_LOC_ABR_TOTAL_STEPS - 1;
+	prev_level = abr->active_level;
 	abr->active_level = step / MOQ_LOC_ABR_SUBSTEPS;
 	abr->active_substep = step % MOQ_LOC_ABR_SUBSTEPS;
 	moq_loc_abr_apply_step(abr, abr->active_level, abr->active_substep);
+	if(abr->active_level != prev_level)
+		abr->level_stable_dwell = 0;
+}
+
+static gboolean moq_loc_abr_step_raises_resolution(int from_step, int to_step) {
+	return (to_step / MOQ_LOC_ABR_SUBSTEPS) < (from_step / MOQ_LOC_ABR_SUBSTEPS);
+}
+
+static gboolean moq_loc_abr_step_lowers_resolution(int from_step, int to_step) {
+	return (to_step / MOQ_LOC_ABR_SUBSTEPS) > (from_step / MOQ_LOC_ABR_SUBSTEPS);
 }
 
 void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
@@ -271,27 +287,64 @@ void moq_loc_abr_update(moq_loc_abr *abr, imquic_connection *conn,
 	if(stress > 1.0)
 		stress = 1.0;
 
-	if(abr->level_dwell < MOQ_LOC_ABR_MIN_LEVEL_DWELL) {
-		abr->level_dwell++;
-	} else {
+	{
 		int active_step = moq_loc_abr_active_step(abr);
-		int target_step = moq_loc_abr_stress_to_step(stress, MOQ_LOC_ABR_STRESS_HYSTERESIS, FALSE);
+		int target_degrade = moq_loc_abr_stress_to_step(stress, MOQ_LOC_ABR_STRESS_HYSTERESIS, TRUE);
 
-		if(target_step > active_step) {
+		if(target_degrade <= active_step)
+			abr->level_stable_dwell++;
+		else
+			abr->level_stable_dwell = 0;
+	}
+
+	{
+		int active_step = moq_loc_abr_active_step(abr);
+		int target_improve = moq_loc_abr_stress_to_step(stress, MOQ_LOC_ABR_STRESS_HYSTERESIS, FALSE);
+		int target_degrade = moq_loc_abr_stress_to_step(stress, MOQ_LOC_ABR_STRESS_HYSTERESIS, TRUE);
+		int dwell_required = MOQ_LOC_ABR_MIN_LEVEL_DWELL;
+
+		if(target_degrade > active_step)
+			dwell_required = MOQ_LOC_ABR_DEGRADE_DWELL;
+
+		if(abr->level_dwell < dwell_required) {
+			abr->level_dwell++;
+		} else if(target_degrade > active_step) {
+			int next_step = active_step + 1;
+			gboolean res_down = moq_loc_abr_step_lowers_resolution(active_step, next_step);
+			int degrade_holdoff = res_down ? MOQ_LOC_ABR_RES_DEGRADE_HOLDOFF :
+				MOQ_LOC_ABR_DEGRADE_HOLDOFF;
+
 			if(abr->degrade_holdoff > 0) {
 				abr->degrade_holdoff--;
 			} else {
-				moq_loc_abr_set_active_step(abr, target_step);
-				abr->degrade_holdoff = MOQ_LOC_ABR_DEGRADE_HOLDOFF;
+				moq_loc_abr_set_active_step(abr, next_step);
+				abr->degrade_holdoff = degrade_holdoff;
 				abr->improve_holdoff = MOQ_LOC_ABR_IMPROVE_HOLDOFF;
+				abr->res_improve_holdoff = MOQ_LOC_ABR_RES_IMPROVE_HOLDOFF;
 				abr->level_dwell = 0;
 				config_changed = TRUE;
 			}
-		} else if(target_step < active_step) {
-			if(abr->improve_holdoff > 0) {
+		} else if(target_improve < active_step) {
+			int next_step = active_step - 1;
+			gboolean res_up = moq_loc_abr_step_raises_resolution(active_step, next_step);
+
+			if(res_up) {
+				if(abr->level_stable_dwell < MOQ_LOC_ABR_RES_STABLE_DWELL) {
+					/* Wait until the current resolution level is stable */
+				} else if(abr->res_improve_holdoff > 0) {
+					abr->res_improve_holdoff--;
+				} else {
+					moq_loc_abr_set_active_step(abr, next_step);
+					abr->res_improve_holdoff = MOQ_LOC_ABR_RES_IMPROVE_HOLDOFF;
+					abr->improve_holdoff = MOQ_LOC_ABR_IMPROVE_HOLDOFF;
+					abr->degrade_holdoff = MOQ_LOC_ABR_DEGRADE_HOLDOFF;
+					abr->level_dwell = 0;
+					config_changed = TRUE;
+				}
+			} else if(abr->improve_holdoff > 0) {
 				abr->improve_holdoff--;
 			} else {
-				moq_loc_abr_set_active_step(abr, target_step);
+				moq_loc_abr_set_active_step(abr, next_step);
 				abr->improve_holdoff = MOQ_LOC_ABR_IMPROVE_HOLDOFF;
 				abr->degrade_holdoff = MOQ_LOC_ABR_DEGRADE_HOLDOFF;
 				abr->level_dwell = 0;
