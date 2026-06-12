@@ -33,11 +33,31 @@ static int moq_loc_abr_even_dim(int value) {
 	return (value & 1) ? value + 1 : value;
 }
 
-static int moq_loc_abr_scale_dim(int max, double factor, int floor) {
-	int scaled = (int)(max * factor);
-	if(scaled < floor)
-		scaled = floor;
-	return moq_loc_abr_even_dim(scaled);
+static void moq_loc_abr_scale_resolution(int max_width, int max_height, double factor,
+		int min_width, int *width, int *height) {
+	double aspect = (double)max_width / (double)max_height;
+	int w = 0, h = 0, default_min_width = 0;
+
+	w = (int)(max_width * factor);
+	if(min_width > 0 && w < min_width)
+		w = min_width;
+	default_min_width = moq_loc_abr_even_dim(max_width / 4);
+	if(min_width <= 0 && w < default_min_width)
+		w = default_min_width;
+	w = moq_loc_abr_even_dim(w);
+	h = moq_loc_abr_even_dim((int)(w / aspect + 0.5));
+
+	if(w > max_width) {
+		w = max_width;
+		h = moq_loc_abr_even_dim((int)(w / aspect + 0.5));
+	}
+	if(h > max_height) {
+		h = max_height;
+		w = moq_loc_abr_even_dim((int)(h * aspect + 0.5));
+	}
+
+	*width = w;
+	*height = h;
 }
 
 static void moq_loc_abr_build_ladder(moq_loc_abr *abr) {
@@ -46,7 +66,6 @@ static void moq_loc_abr_build_ladder(moq_loc_abr *abr) {
 	const double vbr_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.50, 0.25, 0.125, 0.0625, 0.03125 };
 	const double abr_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.75, 0.50, 0.375, 0.25, 0.1875 };
 	const int min_widths[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 320, 320, 160 };
-	const int min_heights[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 240, 240, 120 };
 	const int min_fps[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 0, 5, 2 };
 	const int min_vbr[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 0, 64000, 32000 };
 	const int min_abr[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 0, 8000, 6000 };
@@ -54,14 +73,8 @@ static void moq_loc_abr_build_ladder(moq_loc_abr *abr) {
 
 	for(i = 0; i < MOQ_LOC_ABR_LEVELS; i++) {
 		moq_loc_abr_config *level = &abr->levels[i];
-		level->width = moq_loc_abr_scale_dim(abr->max_width, res_factors[i],
-			min_widths[i] > 0 ? min_widths[i] : moq_loc_abr_even_dim(abr->max_width / 4));
-		level->height = moq_loc_abr_scale_dim(abr->max_height, res_factors[i],
-			min_heights[i] > 0 ? min_heights[i] : moq_loc_abr_even_dim(abr->max_height / 4));
-		if(level->width > abr->max_width)
-			level->width = abr->max_width;
-		if(level->height > abr->max_height)
-			level->height = abr->max_height;
+		moq_loc_abr_scale_resolution(abr->max_width, abr->max_height, res_factors[i],
+			min_widths[i], &level->width, &level->height);
 		level->fps = (int)(abr->max_fps * fps_factors[i]);
 		if(level->fps < min_fps[i])
 			level->fps = min_fps[i];
