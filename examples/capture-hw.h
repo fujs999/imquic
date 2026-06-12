@@ -65,4 +65,12 @@ int imquic_demo_open_video_encoder(AVCodecContext **pctx, imquic_demo_video_code
 void imquic_demo_configure_video_encoder(AVCodecContext *ctx, imquic_demo_video_codec codec,
 	imquic_demo_hw_vendor vendor, int bitrate, int fps);
 
+/*
+ * If src is a hardware frame (e.g. DRM_PRIME from rkmpp), transfer it into sw_frame.
+ * On success, *out points to the frame to consume (src or sw_frame).
+ */
+int imquic_demo_prepare_sw_decode_frame(AVFrame *src, AVFrame *sw_frame, AVFrame **out);
+
+void imquic_demo_capture_hw_deinit(void);
+
 #endif

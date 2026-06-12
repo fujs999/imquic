@@ -7,6 +7,7 @@
 
 #include <imquic/imquic.h>
 
+#include <libavutil/hwcontext.h>
 #include <libavutil/opt.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -19,8 +20,11 @@ typedef struct imquic_demo_codec_candidate {
 	imquic_demo_hw_vendor vendor;
 } imquic_demo_codec_candidate;
 
+static AVBufferRef *rkmpp_hw_device = NULL;
+
 static const imquic_demo_codec_candidate h264_encoders[] = {
 	{ "h264_rkmpp", IMQUIC_DEMO_HW_ROCKCHIP },
+	{ "h264_v4l2m2m", IMQUIC_DEMO_HW_ROCKCHIP },
 	{ "h264_nvenc", IMQUIC_DEMO_HW_NVIDIA },
 	{ "h264_qsv", IMQUIC_DEMO_HW_INTEL },
 	{ "h264_vaapi", IMQUIC_DEMO_HW_INTEL },
@@ -35,12 +39,14 @@ static const imquic_demo_codec_candidate h264_svc_encoders[] = {
 };
 
 static const imquic_demo_codec_candidate vp8_encoders[] = {
+	{ "vp8_v4l2m2m", IMQUIC_DEMO_HW_ROCKCHIP },
 	{ "vp8_qsv", IMQUIC_DEMO_HW_INTEL },
 	{ "libvpx", IMQUIC_DEMO_HW_SOFTWARE },
 	{ NULL, IMQUIC_DEMO_HW_NONE }
 };
 
 static const imquic_demo_codec_candidate vp9_encoders[] = {
+	{ "vp9_v4l2m2m", IMQUIC_DEMO_HW_ROCKCHIP },
 	{ "vp9_qsv", IMQUIC_DEMO_HW_INTEL },
 	{ "vp9_vaapi", IMQUIC_DEMO_HW_INTEL },
 	{ "libvpx-vp9", IMQUIC_DEMO_HW_SOFTWARE },
@@ -59,6 +65,7 @@ static const imquic_demo_codec_candidate av1_encoders[] = {
 
 static const imquic_demo_codec_candidate mjpeg_decoders[] = {
 	{ "mjpeg_rkmpp", IMQUIC_DEMO_HW_ROCKCHIP },
+	{ "mjpeg_v4l2m2m", IMQUIC_DEMO_HW_ROCKCHIP },
 	{ "mjpeg_qsv", IMQUIC_DEMO_HW_INTEL },
 	{ "mjpeg", IMQUIC_DEMO_HW_SOFTWARE },
 	{ NULL, IMQUIC_DEMO_HW_NONE }
@@ -66,6 +73,7 @@ static const imquic_demo_codec_candidate mjpeg_decoders[] = {
 
 static const imquic_demo_codec_candidate h264_decoders[] = {
 	{ "h264_rkmpp", IMQUIC_DEMO_HW_ROCKCHIP },
+	{ "h264_v4l2m2m", IMQUIC_DEMO_HW_ROCKCHIP },
 	{ "h264_cuvid", IMQUIC_DEMO_HW_NVIDIA },
 	{ "h264_qsv", IMQUIC_DEMO_HW_INTEL },
 	{ "h264", IMQUIC_DEMO_HW_SOFTWARE },
@@ -74,6 +82,7 @@ static const imquic_demo_codec_candidate h264_decoders[] = {
 
 static const imquic_demo_codec_candidate hevc_decoders[] = {
 	{ "hevc_rkmpp", IMQUIC_DEMO_HW_ROCKCHIP },
+	{ "hevc_v4l2m2m", IMQUIC_DEMO_HW_ROCKCHIP },
 	{ "hevc_cuvid", IMQUIC_DEMO_HW_NVIDIA },
 	{ "hevc_qsv", IMQUIC_DEMO_HW_INTEL },
 	{ "hevc", IMQUIC_DEMO_HW_SOFTWARE },
@@ -140,6 +149,43 @@ static const imquic_demo_codec_candidate *imquic_demo_decoder_list(enum AVCodecI
 			(*count)++;
 	}
 	return list;
+}
+
+static gboolean imquic_demo_is_rkmpp_codec(const char *name) {
+	return name != NULL && g_str_has_suffix(name, "_rkmpp");
+}
+
+static int imquic_demo_ensure_rkmpp_device(void) {
+	enum AVHWDeviceType type;
+	int ret = 0;
+
+	if(rkmpp_hw_device != NULL)
+		return 0;
+	type = av_hwdevice_find_type_by_name("rkmpp");
+	if(type == AV_HWDEVICE_TYPE_NONE) {
+		IMQUIC_LOG(IMQUIC_LOG_VERB, "RKMPP hwdevice type not available in this FFmpeg build\n");
+		return AVERROR(ENOENT);
+	}
+	ret = av_hwdevice_ctx_create(&rkmpp_hw_device, type, NULL, NULL, 0);
+	if(ret < 0) {
+		IMQUIC_LOG(IMQUIC_LOG_WARN, "Failed to create RKMPP hw device: %d (%s)\n",
+			ret, av_err2str(ret));
+		return ret;
+	}
+	IMQUIC_LOG(IMQUIC_LOG_INFO, "Created RKMPP hardware device context\n");
+	return 0;
+}
+
+static void imquic_demo_attach_rkmpp_device(AVCodecContext *ctx, const char *codec_name) {
+	if(ctx == NULL || !imquic_demo_is_rkmpp_codec(codec_name))
+		return;
+	if(imquic_demo_ensure_rkmpp_device() < 0)
+		return;
+	ctx->hw_device_ctx = av_buffer_ref(rkmpp_hw_device);
+}
+
+void imquic_demo_capture_hw_deinit(void) {
+	av_buffer_unref(&rkmpp_hw_device);
 }
 
 const char *imquic_demo_hw_vendor_str(imquic_demo_hw_vendor vendor) {
@@ -270,6 +316,30 @@ static gboolean imquic_demo_encoder_option_available(AVCodecContext *ctx, const 
 	return av_opt_find(ctx->priv_data, name, NULL, 0, AV_OPT_SEARCH_CHILDREN) != NULL;
 }
 
+static gboolean imquic_demo_is_hw_pix_fmt(enum AVPixelFormat fmt) {
+	return fmt == AV_PIX_FMT_DRM_PRIME || fmt == AV_PIX_FMT_VAAPI ||
+		fmt == AV_PIX_FMT_CUDA || fmt == AV_PIX_FMT_QSV;
+}
+
+int imquic_demo_prepare_sw_decode_frame(AVFrame *src, AVFrame *sw_frame, AVFrame **out) {
+	int ret = 0;
+	if(src == NULL || sw_frame == NULL || out == NULL)
+		return AVERROR(EINVAL);
+	if(!imquic_demo_is_hw_pix_fmt(src->format)) {
+		*out = src;
+		return 0;
+	}
+	av_frame_unref(sw_frame);
+	ret = av_hwframe_transfer_data(sw_frame, src, 0);
+	if(ret < 0) {
+		IMQUIC_LOG(IMQUIC_LOG_WARN, "Failed to transfer hw decode frame to CPU: %d (%s)\n",
+			ret, av_err2str(ret));
+		return ret;
+	}
+	*out = sw_frame;
+	return 0;
+}
+
 void imquic_demo_configure_video_encoder(AVCodecContext *ctx, imquic_demo_video_codec codec,
 		imquic_demo_hw_vendor vendor, int bitrate, int fps) {
 	char br[32];
@@ -355,7 +425,7 @@ void imquic_demo_configure_video_encoder(AVCodecContext *ctx, imquic_demo_video_
 }
 
 static void imquic_demo_prepare_video_encoder_ctx(AVCodecContext *ctx, imquic_demo_video_codec codec,
-		int width, int height, int fps, int bitrate, gboolean global_header) {
+		const char *codec_name, int width, int height, int fps, int bitrate, gboolean global_header) {
 	ctx->bit_rate = bitrate;
 	ctx->rc_max_rate = bitrate + (bitrate / 10);
 	ctx->rc_buffer_size = 2 * bitrate;
@@ -365,6 +435,8 @@ static void imquic_demo_prepare_video_encoder_ctx(AVCodecContext *ctx, imquic_de
 	ctx->framerate = (AVRational){ fps, 1 };
 	ctx->gop_size = fps * 2;
 	ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+	if(codec_name != NULL && g_str_has_suffix(codec_name, "_vaapi"))
+		ctx->pix_fmt = AV_PIX_FMT_VAAPI;
 	if(global_header)
 		ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_ANNEXB || codec == DEMO_H264_SVC) {
@@ -377,8 +449,8 @@ static int imquic_demo_try_open_codec(AVCodecContext **pctx, const AVCodec *code
 		imquic_demo_hw_vendor vendor, const char *label) {
 	int ret = avcodec_open2(*pctx, codec, NULL);
 	if(ret < 0) {
-		IMQUIC_LOG(IMQUIC_LOG_VERB, "  -- %s encoder '%s' unavailable (%d)\n",
-			label, codec->name, ret);
+		IMQUIC_LOG(IMQUIC_LOG_WARN, "Video %s '%s' unavailable: %d (%s)\n",
+			label, codec->name, ret, av_err2str(ret));
 		avcodec_free_context(pctx);
 		*pctx = NULL;
 		return -1;
@@ -410,12 +482,15 @@ int imquic_demo_open_video_encoder(AVCodecContext **pctx, imquic_demo_video_code
 		name = list[i].name;
 		try_vendor = list[i].vendor;
 		try_codec = avcodec_find_encoder_by_name(name);
-		if(try_codec == NULL)
+		if(try_codec == NULL) {
+			IMQUIC_LOG(IMQUIC_LOG_VERB, "Video encoder '%s' not available in this FFmpeg build\n", name);
 			continue;
+		}
 		ctx = avcodec_alloc_context3(try_codec);
 		if(ctx == NULL)
 			continue;
-		imquic_demo_prepare_video_encoder_ctx(ctx, codec, width, height, fps, bitrate, global_header);
+		imquic_demo_prepare_video_encoder_ctx(ctx, codec, name, width, height, fps, bitrate, global_header);
+		imquic_demo_attach_rkmpp_device(ctx, name);
 		imquic_demo_configure_video_encoder(ctx, codec, try_vendor, bitrate, fps);
 		if(extra_config != NULL)
 			extra_config(ctx, extra_config_ud);
@@ -451,8 +526,11 @@ int imquic_demo_open_video_decoder(AVCodecContext **pctx, enum AVCodecID codec_i
 	if(list != NULL) {
 		for(int i = 0; i < count; i++) {
 			try_codec = avcodec_find_decoder_by_name(list[i].name);
-			if(try_codec == NULL)
+			if(try_codec == NULL) {
+				IMQUIC_LOG(IMQUIC_LOG_VERB, "Video decoder '%s' not available in this FFmpeg build\n",
+					list[i].name);
 				continue;
+			}
 			ctx = avcodec_alloc_context3(try_codec);
 			if(ctx == NULL)
 				continue;
@@ -460,6 +538,7 @@ int imquic_demo_open_video_decoder(AVCodecContext **pctx, enum AVCodecID codec_i
 				avcodec_free_context(&ctx);
 				continue;
 			}
+			imquic_demo_attach_rkmpp_device(ctx, list[i].name);
 			if(imquic_demo_try_open_codec(&ctx, try_codec, list[i].vendor, "decoder") == 0) {
 				*pctx = ctx;
 				if(selected != NULL)

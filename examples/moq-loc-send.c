@@ -383,6 +383,7 @@ static void imquic_demo_destroy_video_encoder(void) {
 	if(sws != NULL)
 		sws_freeContext(sws);
 	sws = NULL;
+	imquic_demo_capture_hw_deinit();
 }
 
 /* Annex-B to AVCC translation for SPS/PPS (AVCC extradata) */
@@ -552,6 +553,7 @@ static void *imquic_demo_video_capture_thread(void *user_data) {
 
 	AVPacket packet = { 0 };
 	AVFrame *video_frame = av_frame_alloc();
+	AVFrame *sw_video_frame = av_frame_alloc();
 	int scale_width = 0, scale_height = 0, last_scale_width = 0, last_scale_height = 0;
 
 	while(!stop) {
@@ -609,11 +611,14 @@ static void *imquic_demo_video_capture_thread(void *user_data) {
 			}
 			IMQUIC_LOG(IMQUIC_LOG_VERB, "Frame resolution: %dx%d\n",
 				video_frame->width, video_frame->height);
+			AVFrame *decode_frame = video_frame;
+			if(imquic_demo_prepare_sw_decode_frame(video_frame, sw_video_frame, &decode_frame) < 0)
+				continue;
 			/* Convert the video frame to the right format and scale to ABR target */
 			if(sws == NULL || scale_width != last_scale_width || scale_height != last_scale_height) {
 				if(sws != NULL)
 					sws_freeContext(sws);
-				sws = sws_getContext(video_frame->width, video_frame->height, video_frame->format,
+				sws = sws_getContext(decode_frame->width, decode_frame->height, decode_frame->format,
 					scale_width, scale_height, AV_PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);
 				last_scale_width = scale_width;
 				last_scale_height = scale_height;
@@ -631,8 +636,8 @@ static void *imquic_demo_video_capture_thread(void *user_data) {
 				av_frame_free(&scaled_frame);
 				break;
 			}
-			sws_scale(sws, (const uint8_t * const*)video_frame->data, video_frame->linesize,
-				0, video_frame->height, scaled_frame->data, scaled_frame->linesize);
+			sws_scale(sws, (const uint8_t * const*)decode_frame->data, decode_frame->linesize,
+				0, decode_frame->height, scaled_frame->data, scaled_frame->linesize);
 			/* Update the latest video frame, for the encoding thread */
 			imquic_mutex_lock(&mutex);
 			if(latest_frame != NULL) {
@@ -644,6 +649,7 @@ static void *imquic_demo_video_capture_thread(void *user_data) {
 		}
 		av_packet_unref(&packet);
 	}
+	av_frame_free(&sw_video_frame);
 	av_frame_free(&video_frame);
 
 	IMQUIC_LOG(IMQUIC_LOG_INFO, "Leaving video capture thread\n");
