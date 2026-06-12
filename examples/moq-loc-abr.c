@@ -75,9 +75,11 @@ void moq_loc_abr_fit_dimensions(int max_width, int max_height, int target_width,
 }
 
 static void moq_loc_abr_build_ladder(moq_loc_abr *abr) {
+	const double res_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.75, 0.50, 0.375, 0.25, 0.125 };
 	const double fps_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.80, 0.60, 0.40, 0.25, 0.10 };
 	const double vbr_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.50, 0.25, 0.125, 0.0625, 0.03125 };
 	const double abr_factors[MOQ_LOC_ABR_LEVELS] = { 1.0, 0.75, 0.50, 0.375, 0.25, 0.1875 };
+	const int min_widths[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 320, 320, 160 };
 	const int min_fps[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 0, 5, 2 };
 	const int min_vbr[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 0, 64000, 32000 };
 	const int min_abr[MOQ_LOC_ABR_LEVELS] = { 0, 0, 0, 0, 8000, 6000 };
@@ -85,9 +87,8 @@ static void moq_loc_abr_build_ladder(moq_loc_abr *abr) {
 
 	for(i = 0; i < MOQ_LOC_ABR_LEVELS; i++) {
 		moq_loc_abr_config *level = &abr->levels[i];
-		/* Keep max resolution at every level; adapt fps and bitrate only */
-		level->width = abr->max_width;
-		level->height = abr->max_height;
+		moq_loc_abr_scale_resolution(abr->max_width, abr->max_height, res_factors[i],
+			min_widths[i], &level->width, &level->height);
 		level->fps = (int)(abr->max_fps * fps_factors[i]);
 		if(level->fps < min_fps[i])
 			level->fps = min_fps[i];
