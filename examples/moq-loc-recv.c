@@ -195,6 +195,8 @@ static int imquic_demo_create_video_decoder(uint8_t *extradata, size_t extradata
 		memset(videodec_ctx->extradata + extradata_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
 		videodec_ctx->extradata_size = extradata_size;
 	}
+	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_SVC || codec == DEMO_H264_ANNEXB)
+		videodec_ctx->err_recognition = AV_EF_AGGRESSIVE | AV_EF_EXPLODE;
 	if(avcodec_open2(videodec_ctx, video_codec, NULL) < 0) {
 		/* Error creating video decoder */
 		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error opening video decoder\n");
@@ -211,13 +213,13 @@ static gboolean imquic_demo_object_is_keyframe(imquic_moq_object *object,
 		struct imquic_moq_property_data *loc_extradata) {
 	if(object == NULL)
 		return FALSE;
+	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_SVC)
+		return imquic_demo_h264_avcc_is_keyframe(object->payload, object->payload_len);
 	if(loc_extradata != NULL)
 		return TRUE;
 	/* imquic-moq-loc-send starts a new group on each keyframe with object_id=0 */
 	if(object->object_id == 0)
 		return TRUE;
-	if(codec == DEMO_H264_AVCC || codec == DEMO_H264_SVC)
-		return imquic_demo_h264_avcc_is_keyframe(object->payload, object->payload_len);
 	if(codec == DEMO_H264_ANNEXB)
 		return imquic_demo_h264_is_keyframe(object->payload, object->payload_len);
 	if(codec == DEMO_VP8)
@@ -374,6 +376,7 @@ static void imquic_demo_reset_video_decode_sync(void) {
 
 static void imquic_demo_on_video_loss(void) {
 	imquic_demo_reset_video_decode_sync();
+	got_keyframe = FALSE;
 	if(videodec_ctx != NULL)
 		avcodec_flush_buffers(videodec_ctx);
 }
@@ -1409,8 +1412,7 @@ int main(int argc, char *argv[]) {
 #if (LIBAVFORMAT_VERSION_INT < AV_VERSION_INT(58,9,100))
 	av_register_all();
 #endif
-	if(options.debug_ffmpeg)
-		av_log_set_level(AV_LOG_DEBUG);
+	av_log_set_level(options.debug_ffmpeg ? AV_LOG_DEBUG : AV_LOG_FATAL);
 
 	/* Parse the command line arguments*/
 	int ret = 0;
