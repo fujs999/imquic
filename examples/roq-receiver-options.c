@@ -45,7 +45,7 @@ gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
 		{ "audio-pt", 'P', 0, G_OPTION_ARG_INT, &options->audio_pt, "When displaying, RTP payload type for Opus audio (default=111)", "pt" },
 		{ "video-flow", 'V', 0, G_OPTION_ARG_INT64, &options->video_flow, "When displaying, flow ID of the video RTP stream (default=1)", "number" },
 		{ "video-pt", 'T', 0, G_OPTION_ARG_INT, &options->video_pt, "When displaying, RTP payload type for video (default=96)", "pt" },
-		{ "video-codec", 'e', 0, G_OPTION_ARG_STRING, &options->video_codec, "When displaying, video codec to use (default=h264-annexb)", "h264-annexb|h264-svc|vp9|vp9-svc" },
+		{ "video-codec", 'e', 0, G_OPTION_ARG_STRING, &options->video_codec, "When displaying, video codec to use (default=h264-annexb)", "h264-annexb|h264-svc|vp8|vp9|vp9-svc" },
 		{ "svc-temporal-layers", 0, 0, G_OPTION_ARG_INT, &options->svc_temporal_layers, "Expected SVC temporal layers from sender (default=2, max=4)", "2-4" },
 		{ "svc-max-temporal-layer", 0, 0, G_OPTION_ARG_INT, &options->svc_max_temporal_layer, "Maximum SVC temporal layer to decode (-1=all, default=-1)", "0-3" },
 		{ "svc-max-spatial-layer", 0, 0, G_OPTION_ARG_INT, &options->svc_max_spatial_layer, "Maximum SVC spatial layer to decode (-1=all, default=-1)", "0-2" },

@@ -62,6 +62,13 @@ typedef struct imquic_roq_vp9_depay {
 	gboolean in_frame;
 } imquic_roq_vp9_depay;
 
+typedef struct imquic_roq_vp8_depay {
+	GByteArray *frame;
+	uint32_t last_ts;
+	uint16_t last_seq;
+	gboolean in_frame;
+} imquic_roq_vp8_depay;
+
 gboolean imquic_roq_is_rtp(uint8_t *buf, guint len);
 
 void imquic_roq_rtp_state_init(imquic_roq_rtp_state *state, uint8_t payload_type, uint32_t ssrc);
@@ -76,7 +83,17 @@ gboolean imquic_roq_rtp_packetize_vp9(imquic_roq_rtp_state *state,
 	const uint8_t *frame, size_t len, int fps, gboolean keyframe,
 	imquic_roq_rtp_packet_cb cb, void *user_data);
 
+gboolean imquic_roq_rtp_packetize_vp8(imquic_roq_rtp_state *state,
+	const uint8_t *frame, size_t len, int fps, gboolean keyframe,
+	imquic_roq_rtp_packet_cb cb, void *user_data);
+
 void imquic_roq_vp9_depay_reset(imquic_roq_vp9_depay *depay);
+
+void imquic_roq_vp8_depay_reset(imquic_roq_vp8_depay *depay);
+
+gboolean imquic_roq_rtp_depay_vp8(imquic_roq_vp8_depay *depay,
+	const uint8_t *payload, size_t payload_len, uint16_t seq, uint32_t timestamp,
+	gboolean rtp_marker, uint8_t **frame, size_t *frame_len);
 
 gboolean imquic_roq_rtp_depay_vp9(imquic_roq_vp9_depay *depay,
 	const uint8_t *payload, size_t payload_len, uint16_t seq, uint32_t timestamp,

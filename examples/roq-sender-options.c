@@ -24,7 +24,7 @@ gboolean demo_options_parse(demo_options *options, int argc, char *argv[]) {
 		{ "video-encode-device", 0, 0, G_OPTION_ARG_STRING, &options->video_encode_device, "When capturing, V4L2 M2M encoder device (RK3588: /dev/video-enc0)", "device" },
 		{ "video-resolution", 'W', 0, G_OPTION_ARG_STRING, &options->video_resolution, "When capturing, video resolution to capture (default=640x480)", "resolution" },
 		{ "video-framerate", 'F', 0, G_OPTION_ARG_INT, &options->video_framerate, "When capturing, video framerate in frames per second (default=25)", "fps" },
-		{ "video-codec", 'e', 0, G_OPTION_ARG_STRING, &options->video_codec, "When capturing, video codec to use (default=h264-annexb)", "h264-annexb|h264-svc|vp9|vp9-svc" },
+		{ "video-codec", 'e', 0, G_OPTION_ARG_STRING, &options->video_codec, "When capturing, video codec to use (default=h264-annexb)", "h264-annexb|h264-svc|vp8|vp9|vp9-svc" },
 		{ "svc-temporal-layers", 0, 0, G_OPTION_ARG_INT, &options->svc_temporal_layers, "Number of SVC temporal layers for h264-svc/vp9-svc (default=2, max=4)", "2-4" },
 		{ "svc-spatial-layers", 0, 0, G_OPTION_ARG_INT, &options->svc_spatial_layers, "Number of SVC spatial layers for h264-svc/vp9-svc (default=1, max=3)", "1-3" },
 		{ "audio-pt", 'P', 0, G_OPTION_ARG_INT, &options->audio_pt, "When capturing, RTP payload type for Opus audio (default=111)", "pt" },

@@ -23,6 +23,7 @@
 
 #include "roq-display.h"
 #include "moq-loc-svc.h"
+#include "moq-utils.h"
 #include "roq-utils.h"
 
 #define ROQ_DISPLAY_ANNEXB_MAX (512 * 1024)
@@ -45,6 +46,7 @@ typedef struct roq_h264_depay {
 static roq_display_config cfg = { 0 };
 static roq_h264_depay depay = { 0 };
 static imquic_roq_vp9_depay vp9_depay = { 0 };
+static imquic_roq_vp8_depay vp8_depay = { 0 };
 static imquic_demo_video_codec video_codec_id = DEMO_H264_ANNEXB;
 static int svc_max_temporal_layer = -1;
 static int svc_max_spatial_layer = -1;
@@ -321,7 +323,7 @@ static int roq_display_create_decoder(void) {
 	videodec_ctx = avcodec_alloc_context3(video_codec);
 	if(videodec_ctx == NULL)
 		return -1;
-	if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC)
+	if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC || video_codec_id == DEMO_VP8)
 		videodec_ctx->thread_count = 2;
 	if(avcodec_open2(videodec_ctx, video_codec, NULL) < 0) {
 		IMQUIC_LOG(IMQUIC_LOG_ERR, "Error opening video decoder\n");
@@ -730,6 +732,33 @@ static int roq_display_decode_access_unit(uint8_t *buffer, size_t length, gboole
 	return 0;
 }
 
+static void roq_display_feed_vp8(uint64_t flow_id, imquic_roq_rtp_header *header,
+		uint8_t *rtp, size_t rtp_len) {
+	size_t payload_len = 0;
+	size_t payload_offset = roq_display_rtp_payload_offset(rtp, rtp_len, &payload_len);
+	uint8_t *frame = NULL;
+	size_t frame_len = 0;
+	gboolean keyframe = FALSE;
+	roq_display_track_video_rtp(header);
+	if(payload_offset == 0 || payload_len == 0)
+		return;
+	const uint8_t *payload = rtp + payload_offset;
+	if(!imquic_roq_rtp_depay_vp8(&vp8_depay, payload, payload_len,
+			ntohs(header->seq_number), ntohl(header->timestamp),
+			header->markerbit != 0, &frame, &frame_len))
+		return;
+	if(frame == NULL || frame_len == 0)
+		return;
+	if(frame_len > ROQ_DISPLAY_ANNEXB_MAX) {
+		IMQUIC_LOG(IMQUIC_LOG_WARN, "Dropping oversized VP8 frame (%zu bytes)\n", frame_len);
+		imquic_roq_vp8_depay_reset(&vp8_depay);
+		return;
+	}
+	keyframe = imquic_demo_vp8_is_keyframe(frame, frame_len);
+	roq_display_decode_access_unit(frame, frame_len, keyframe);
+	imquic_roq_vp8_depay_reset(&vp8_depay);
+}
+
 static void roq_display_feed_vp9(uint64_t flow_id, imquic_roq_rtp_header *header,
 		uint8_t *rtp, size_t rtp_len) {
 	size_t payload_len = 0;
@@ -768,6 +797,10 @@ static void roq_display_feed_video(uint64_t flow_id, imquic_roq_rtp_header *head
 		return;
 	if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC) {
 		roq_display_feed_vp9(flow_id, header, rtp, rtp_len);
+		return;
+	}
+	if(video_codec_id == DEMO_VP8) {
+		roq_display_feed_vp8(flow_id, header, rtp, rtp_len);
 		return;
 	}
 	roq_display_track_video_rtp(header);
@@ -847,6 +880,8 @@ int roq_display_init(const roq_display_config *config) {
 	if(cfg.play_video) {
 		if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC) {
 			video_codec = avcodec_find_decoder_by_name("libvpx-vp9");
+		} else if(video_codec_id == DEMO_VP8) {
+			video_codec = avcodec_find_decoder_by_name("libvpx");
 		} else {
 			video_codec = avcodec_find_decoder(AV_CODEC_ID_H264);
 		}
@@ -1051,6 +1086,10 @@ void roq_display_destroy(void) {
 	if(vp9_depay.frame != NULL) {
 		g_byte_array_free(vp9_depay.frame, TRUE);
 		vp9_depay.frame = NULL;
+	}
+	if(vp8_depay.frame != NULL) {
+		g_byte_array_free(vp8_depay.frame, TRUE);
+		vp8_depay.frame = NULL;
 	}
 	if(svc_abr != NULL) {
 		moq_loc_svc_abr_destroy(svc_abr);

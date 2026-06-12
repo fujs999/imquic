@@ -47,7 +47,7 @@ In both cases, the client will then send a single `ciao` buffer on a bidirection
 To build the RTP Over QUIC (RoQ) examples, pass `--enable-roq-examples` to the `./configure` script. This will build two command line applications, namely:
 
 * `imquic-roq-sender`, a basic RoQ sender, that will listen for RTP packets on some UDP ports, and restream them via QUIC; if the optional A/V dependencies are available, it can also capture audio/video locally, encode it and send it as RTP over RoQ;
-* `imquic-roq-receiver`, a basic RoQ receiver, that can print the flow ID and RTP headers of the incoming packets, echo packets back, and/or decode and play incoming Opus audio and H.264/VP9 video (including Scalable Video Coding, SVC, when the optional A/V dependencies are available).
+* `imquic-roq-receiver`, a basic RoQ receiver, that can print the flow ID and RTP headers of the incoming packets, echo packets back, and/or decode and play incoming Opus audio and H.264/VP8/VP9 video (including Scalable Video Coding, SVC, when the optional A/V dependencies are available).
 
 Both demos can act as either a server or a client, and provide a few configuration options: pass `-h` or `--help` for more information.
 
@@ -75,7 +75,7 @@ If the optional A/V dependencies are available, the RoQ sender can also capture 
 
 	./examples/imquic-roq-sender -o -q --capture -A 0 -V 1 -r 127.0.0.1 -R 9000
 
-When capturing, the video codec can be selected via `-e` (e.g., `h264-annexb`, `h264-svc`, `vp9` or `vp9-svc`), and SVC temporal/spatial layers can be configured via `--svc-temporal-layers` and `--svc-spatial-layers`. Adaptive streaming is enabled by default when capturing non-SVC codecs (see [Adaptive streaming](#adaptive-streaming-loc-and-roq-capture) below); disable it entirely via `--no-adaptive`, or disable individual dimensions via `--no-adaptive-resolution`, `--no-adaptive-bitrate` and `--no-adaptive-framerate`. When using SVC codecs, the sender can also react to SVC feedback from the receiver to limit which temporal layers are sent.
+When capturing, the video codec can be selected via `-e` (e.g., `h264-annexb`, `h264-svc`, `vp8`, `vp9` or `vp9-svc`), and SVC temporal/spatial layers can be configured via `--svc-temporal-layers` and `--svc-spatial-layers`. Adaptive streaming is enabled by default when capturing non-SVC codecs (see [Adaptive streaming](#adaptive-streaming-loc-and-roq-capture) below); disable it entirely via `--no-adaptive`, or disable individual dimensions via `--no-adaptive-resolution`, `--no-adaptive-bitrate` and `--no-adaptive-framerate`. When using SVC codecs, the sender can also react to SVC feedback from the receiver to limit which temporal layers are sent.
 
 Since both demos can act as both client and server, it's possible to reverse the QUIC roles of this demo. When a sender acts as a server, it will relay RTP packets via RoQ to all the receiver clients that connect.
 

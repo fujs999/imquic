@@ -631,6 +631,9 @@ static void *roq_capture_video_enc_thread(void *user_data) {
 		if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC) {
 			imquic_roq_rtp_packetize_vp9(&video_rtp, packet.data, (size_t)packet.size, target_fps, kf,
 				roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
+		} else if(video_codec_id == DEMO_VP8) {
+			imquic_roq_rtp_packetize_vp8(&video_rtp, packet.data, (size_t)packet.size, target_fps, kf,
+				roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
 		} else {
 			imquic_roq_rtp_packetize_h264_annexb(&video_rtp, packet.data, (size_t)packet.size, target_fps,
 				roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
