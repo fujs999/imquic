@@ -86,6 +86,7 @@ typedef struct imquic_demo_moq_track {
 	GList *properties;
 	gboolean svc_track;
 	int svc_temporal_layers;
+	int svc_spatial_layers;
 	imquic_mutex mutex;
 } imquic_demo_moq_track;
 static imquic_demo_moq_track *imquic_demo_moq_track_create(imquic_demo_moq_published_namespace *annc, const char *track_name);
@@ -137,27 +138,33 @@ static GList *imquic_demo_match_monitors(imquic_connection *conn, imquic_moq_nam
 static void imquic_demo_alert_monitors(imquic_demo_moq_published_namespace *annc, imquic_demo_moq_track *track, gboolean done);
 
 static void imquic_demo_track_note_svc_object(imquic_demo_moq_track *track, imquic_moq_object *object) {
-	int temporal = 0;
+	int temporal = 0, spatial = 0;
 	if(track == NULL || object == NULL)
 		return;
 	temporal = moq_loc_svc_object_temporal_layer(object);
-	if(temporal < 0)
+	spatial = moq_loc_svc_object_spatial_layer(object);
+	if(temporal < 0 && spatial < 0)
 		return;
 	track->svc_track = TRUE;
-	if(track->svc_temporal_layers < temporal + 1)
+	if(temporal >= 0 && track->svc_temporal_layers < temporal + 1)
 		track->svc_temporal_layers = temporal + 1;
+	if(spatial >= 0 && track->svc_spatial_layers < spatial + 1)
+		track->svc_spatial_layers = spatial + 1;
 }
 
 static void imquic_demo_subscription_ensure_svc_abr(imquic_demo_moq_subscription *s) {
-	int layers = 0;
+	int temporal_layers = 0, spatial_layers = 0;
 	if(s == NULL || s->svc_abr != NULL || options.no_svc_adaptive || options.svc_max_temporal_layer >= 0)
 		return;
 	if(s->track == NULL || !s->track->svc_track)
 		return;
-	layers = s->track->svc_temporal_layers;
-	if(layers < 2)
-		layers = 2;
-	s->svc_abr = moq_loc_svc_abr_create(layers);
+	temporal_layers = s->track->svc_temporal_layers;
+	spatial_layers = s->track->svc_spatial_layers;
+	if(temporal_layers < 2)
+		temporal_layers = 2;
+	if(spatial_layers < 1)
+		spatial_layers = 1;
+	s->svc_abr = moq_loc_svc_abr_create(temporal_layers, spatial_layers);
 }
 
 static int imquic_demo_subscription_max_temporal(imquic_demo_moq_subscription *s) {
@@ -165,6 +172,14 @@ static int imquic_demo_subscription_max_temporal(imquic_demo_moq_subscription *s
 		return options.svc_max_temporal_layer;
 	if(s != NULL && s->svc_abr != NULL)
 		return moq_loc_svc_abr_get_max_temporal_layer(s->svc_abr);
+	return -1;
+}
+
+static int imquic_demo_subscription_max_spatial(imquic_demo_moq_subscription *s) {
+	if(options.svc_max_spatial_layer >= 0)
+		return options.svc_max_spatial_layer;
+	if(s != NULL && s->svc_abr != NULL)
+		return moq_loc_svc_abr_get_max_spatial_layer(s->svc_abr);
 	return -1;
 }
 
@@ -275,6 +290,7 @@ static imquic_demo_moq_track *imquic_demo_moq_track_create(imquic_demo_moq_publi
 	t->track_name = g_strdup(track_name);
 	t->pending = TRUE;
 	t->track_alias_valid = FALSE;
+	t->svc_spatial_layers = 1;
 	imquic_mutex_init(&t->mutex);
 	return t;
 }
@@ -1630,7 +1646,8 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 			imquic_demo_subscription_ensure_svc_abr(s);
 			{
 				int max_temporal = imquic_demo_subscription_max_temporal(s);
-				if(!moq_loc_svc_object_within_limits(object, max_temporal, options.svc_max_spatial_layer)) {
+				int max_spatial = imquic_demo_subscription_max_spatial(s);
+				if(!moq_loc_svc_object_within_limits(object, max_temporal, max_spatial)) {
 					temp = temp->next;
 					continue;
 				}

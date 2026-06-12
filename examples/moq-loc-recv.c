@@ -144,9 +144,13 @@ static imquic_demo_video_object_stats video_object_stats = { 0 };
 static int svc_max_temporal_layer = -1;
 static int svc_max_spatial_layer = -1;
 static int svc_max_temporal_cap = -1;
+static int svc_max_spatial_cap = -1;
 static int svc_temporal_layers = 2;
+static int svc_spatial_layers = 1;
 static int svc_publisher_max_temporal = -1;
+static int svc_publisher_max_spatial = -1;
 static int svc_current_temporal_layer = 0;
+static int svc_current_spatial_layer = 0;
 static gboolean svc_adaptive_enabled = FALSE;
 static moq_loc_svc_abr *svc_abr = NULL;
 static imquic_mutex stats_mutex = IMQUIC_MUTEX_INITIALIZER;
@@ -448,6 +452,7 @@ static void imquic_demo_process_video_buffer(void) {
 					moq_loc_svc_layer layer = { 0 };
 					if(moq_loc_svc_layer_from_frame_marking(prop->value.number, &layer)) {
 						svc_current_temporal_layer = layer.temporal_id;
+						svc_current_spatial_layer = layer.spatial_id;
 						IMQUIC_LOG(IMQUIC_LOG_LOCPROP, "  -- -- %s: temporal=%d spatial=%d keyframe=%d\n",
 							imquic_moq_property_type_str(moq_version, prop->id),
 							layer.temporal_id, layer.spatial_id, layer.is_keyframe);
@@ -564,11 +569,16 @@ static void imquic_demo_svc_start_adaptive(void) {
 		return;
 	if(svc_temporal_layers < 2)
 		svc_temporal_layers = 2;
+	if(svc_spatial_layers < 1)
+		svc_spatial_layers = 1;
 	if(svc_abr == NULL) {
-		svc_abr = moq_loc_svc_abr_create(svc_temporal_layers);
+		svc_abr = moq_loc_svc_abr_create(svc_temporal_layers, svc_spatial_layers);
 		svc_adaptive_enabled = TRUE;
 		svc_max_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
-		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive decode enabled (%d temporal layers)\n", svc_temporal_layers);
+		if(svc_max_spatial_cap < 0)
+			svc_max_spatial_layer = moq_loc_svc_abr_get_max_spatial_layer(svc_abr);
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive decode enabled (%d temporal, %d spatial layers)\n",
+			svc_temporal_layers, svc_spatial_layers);
 	}
 }
 
@@ -840,12 +850,17 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 					video_catalog_bitrate = track->bitrate;
 					if(track->temporal_id > 0)
 						svc_publisher_max_temporal = track->temporal_id;
+					if(track->spatial_id > 0)
+						svc_publisher_max_spatial = track->spatial_id;
 					if(moq_loc_svc_is_svc_codec(codec)) {
 						svc_temporal_layers = svc_publisher_max_temporal >= 0 ?
 							svc_publisher_max_temporal + 1 : 2;
+						svc_spatial_layers = svc_publisher_max_spatial >= 0 ?
+							svc_publisher_max_spatial + 1 : 1;
 						imquic_demo_svc_start_adaptive();
-						IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- SVC track detected (publisher max temporal=%d)\n",
-							svc_publisher_max_temporal);
+						IMQUIC_LOG(IMQUIC_LOG_INFO,
+							"  -- SVC track detected (publisher max temporal=%d, spatial=%d)\n",
+							svc_publisher_max_temporal, svc_publisher_max_spatial);
 					}
 				} else {
 					IMQUIC_LOG(IMQUIC_LOG_WARN, "  -- Unsupported '%s' track\n", track->role);
@@ -915,6 +930,7 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 					moq_loc_svc_layer layer = { 0 };
 					if(moq_loc_svc_layer_from_frame_marking(prop->value.number, &layer)) {
 						svc_current_temporal_layer = layer.temporal_id;
+						svc_current_spatial_layer = layer.spatial_id;
 						IMQUIC_LOG(IMQUIC_LOG_LOCPROP, "  -- -- %s: temporal=%d spatial=%d keyframe=%d\n",
 							imquic_moq_property_type_str(moq_version, prop->id),
 							layer.temporal_id, layer.spatial_id, layer.is_keyframe);
@@ -1154,8 +1170,12 @@ static void imquic_demo_update_video_stats(uint32_t ticks) {
 		double media_loss = object_loss_rate_display / 100.0;
 		moq_loc_svc_abr_update(svc_abr, stats_conn, 0, 0, media_loss);
 		svc_max_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
+		if(svc_max_spatial_cap < 0)
+			svc_max_spatial_layer = moq_loc_svc_abr_get_max_spatial_layer(svc_abr);
 		if(svc_max_temporal_cap >= 0 && svc_max_temporal_layer > svc_max_temporal_cap)
 			svc_max_temporal_layer = svc_max_temporal_cap;
+		if(svc_max_spatial_cap >= 0 && svc_max_spatial_layer > svc_max_spatial_cap)
+			svc_max_spatial_layer = svc_max_spatial_cap;
 	}
 	imquic_mutex_unlock(&stats_mutex);
 
@@ -1237,7 +1257,9 @@ static void imquic_demo_render_video_overlay(SDL_Renderer *r) {
 	if(moq_loc_svc_is_svc_codec(codec)) {
 		const char *mode = svc_adaptive_enabled ? "adaptive" : "fixed";
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]),
-			"SVC layer: T%d (max=%2d, %s)", svc_current_temporal_layer, svc_max_temporal_layer, mode);
+			"SVC layer: S%d T%d (max S=%d T=%d, %s)",
+			svc_current_spatial_layer, svc_current_temporal_layer,
+			svc_max_spatial_layer, svc_max_temporal_layer, mode);
 	} else {
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "SVC layer:    n/a");
 	}
@@ -1377,6 +1399,7 @@ static int imquic_demo_render(void) {
 
 /* Main */
 int main(int argc, char *argv[]) {
+	int ret = 0;
 	/* Handle SIGINT (CTRL-C), SIGTERM (from service managers) */
 	signal(SIGINT, imquic_demo_handle_signal);
 	signal(SIGTERM, imquic_demo_handle_signal);
@@ -1403,8 +1426,9 @@ int main(int argc, char *argv[]) {
 	if(options.debug_loc_properties && !options.quiet)
 		IMQUIC_LOG_LOCPROP = IMQUIC_LOG_INFO;
 	svc_max_temporal_cap = options.svc_max_temporal_layer;
+	svc_max_spatial_cap = options.svc_max_spatial_layer;
 	svc_max_spatial_layer = options.svc_max_spatial_layer;
-	if(svc_max_temporal_cap >= 0) {
+	if(svc_max_temporal_cap >= 0 || svc_max_spatial_cap >= 0) {
 		svc_max_temporal_layer = svc_max_temporal_cap;
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC layer filter: max temporal=%d, max spatial=%d\n",
 			svc_max_temporal_layer, svc_max_spatial_layer);
@@ -1416,6 +1440,7 @@ int main(int argc, char *argv[]) {
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
 	if(SDL_Init(SDL_INIT_TIMER | SDL_INIT_AUDIO) < 0) {
 		IMQUIC_LOG(IMQUIC_LOG_FATAL, "Error initializing SDL2: %s\n", SDL_GetError());
+		ret = 1;
 		goto done;
 	}
 
@@ -1425,8 +1450,6 @@ int main(int argc, char *argv[]) {
 #endif
 	av_log_set_level(options.debug_ffmpeg ? AV_LOG_DEBUG : AV_LOG_FATAL);
 
-	/* Parse the command line arguments*/
-	int ret = 0;
 	if(options.remote_host == NULL || options.remote_port == 0) {
 		IMQUIC_LOG(IMQUIC_LOG_FATAL, "Invalid QUIC server address\n");
 		ret = 1;

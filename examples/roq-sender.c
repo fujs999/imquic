@@ -361,8 +361,10 @@ int main(int argc, char *argv[]) {
 				adapt_framerate ? "on" : "off");
 		} else if(capture_video && moq_loc_svc_is_svc_codec(video_codec) && !options.no_adaptive) {
 			int temporal_layers = options.svc_temporal_layers > 0 ? options.svc_temporal_layers : 2;
-			svc_abr = moq_loc_svc_abr_create(temporal_layers);
-			IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive layer selection enabled (targets: RTT<=150ms, jitter<=50ms, loss<=50%%)\n");
+			int spatial_layers = options.svc_spatial_layers > 0 ? options.svc_spatial_layers : 1;
+			svc_abr = moq_loc_svc_abr_create(temporal_layers, spatial_layers);
+			IMQUIC_LOG(IMQUIC_LOG_INFO,
+				"SVC adaptive layer selection enabled (temporal + spatial, targets: RTT<=150ms, jitter<=50ms, loss<=50%%)\n");
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "  -- End-to-end feedback on flow %d, pt %d\n",
 				IMQUIC_ROQ_SVC_FEEDBACK_FLOW_ID, IMQUIC_ROQ_SVC_FEEDBACK_PAYLOAD_TYPE);
 		}

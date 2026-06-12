@@ -287,6 +287,7 @@ int main(int argc, char *argv[]) {
 			.video_pt = (uint8_t)options.video_pt,
 			.video_codec = video_codec,
 			.svc_temporal_layers = options.svc_temporal_layers > 0 ? options.svc_temporal_layers : 2,
+			.svc_spatial_layers = options.svc_spatial_layers > 0 ? options.svc_spatial_layers : 1,
 			.svc_max_temporal_layer = options.svc_max_temporal_layer,
 			.svc_max_spatial_layer = options.svc_max_spatial_layer,
 			.no_svc_adaptive = options.no_svc_adaptive,

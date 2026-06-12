@@ -21,8 +21,11 @@
 
 struct moq_loc_svc_abr {
 	int temporal_layers;
+	int spatial_layers;
 	int max_temporal_layer;
-	int upgrade_holdoff;
+	int max_spatial_layer;
+	int temporal_upgrade_holdoff;
+	int spatial_upgrade_holdoff;
 	double stress;
 	double loss_rate;
 	uint64_t prev_packets_sent;
@@ -149,6 +152,40 @@ static gboolean moq_loc_svc_parse_vp9(const uint8_t *data, size_t len, moq_loc_s
 	return TRUE;
 }
 
+static int moq_loc_svc_even_dim(int value) {
+	if(value <= 0)
+		return 2;
+	return (value & 1) ? value + 1 : value;
+}
+
+static void moq_loc_svc_fit_dimensions(int max_width, int max_height, int target_width,
+		int *width, int *height) {
+	double aspect = 0.0, factor = 0.0;
+	int w = 0, h = 0, min_width = 0;
+	if(max_width <= 0 || max_height <= 0 || target_width <= 0 || width == NULL || height == NULL)
+		return;
+	aspect = (double)max_width / (double)max_height;
+	factor = (double)target_width / (double)max_width;
+	if(factor > 1.0)
+		factor = 1.0;
+	w = (int)(max_width * factor);
+	min_width = moq_loc_svc_even_dim(max_width / 4);
+	if(w < min_width)
+		w = min_width;
+	w = moq_loc_svc_even_dim(w);
+	h = moq_loc_svc_even_dim((int)(w / aspect + 0.5));
+	if(w > max_width) {
+		w = max_width;
+		h = moq_loc_svc_even_dim((int)(w / aspect + 0.5));
+	}
+	if(h > max_height) {
+		h = max_height;
+		w = moq_loc_svc_even_dim((int)(h * aspect + 0.5));
+	}
+	*width = w;
+	*height = h;
+}
+
 void moq_loc_svc_config_init(moq_loc_svc_config *cfg) {
 	if(cfg == NULL)
 		return;
@@ -156,6 +193,7 @@ void moq_loc_svc_config_init(moq_loc_svc_config *cfg) {
 	cfg->temporal_layers = 2;
 	cfg->spatial_layers = 1;
 	cfg->max_send_temporal_layer = MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS - 1;
+	cfg->max_send_spatial_layer = MOQ_LOC_SVC_MAX_SPATIAL_LAYERS - 1;
 }
 
 gboolean moq_loc_svc_config_validate(const moq_loc_svc_config *cfg) {
@@ -168,7 +206,70 @@ gboolean moq_loc_svc_config_validate(const moq_loc_svc_config *cfg) {
 	if(cfg->max_send_temporal_layer < 0 ||
 			cfg->max_send_temporal_layer >= cfg->temporal_layers)
 		return FALSE;
+	if(cfg->max_send_spatial_layer < 0 ||
+			cfg->max_send_spatial_layer >= cfg->spatial_layers)
+		return FALSE;
 	if(!moq_loc_svc_is_svc_codec(cfg->codec))
+		return FALSE;
+	return TRUE;
+}
+
+gboolean moq_loc_svc_use_multi_spatial_encode(const moq_loc_svc_config *cfg) {
+	if(cfg == NULL || !cfg->enabled || cfg->spatial_layers <= 1)
+		return FALSE;
+	return moq_loc_svc_is_svc_codec(cfg->codec);
+}
+
+void moq_loc_svc_spatial_layer_dimensions(int full_width, int full_height, int spatial_layers,
+		int spatial_id, int *width, int *height) {
+	int divisor = 1, target_width = 0;
+	if(width == NULL || height == NULL || full_width <= 0 || full_height <= 0)
+		return;
+	if(spatial_layers < 1)
+		spatial_layers = 1;
+	if(spatial_id < 0)
+		spatial_id = 0;
+	if(spatial_id >= spatial_layers)
+		spatial_id = spatial_layers - 1;
+	if(spatial_layers <= 1) {
+		*width = full_width;
+		*height = full_height;
+		return;
+	}
+	divisor = 1 << (spatial_layers - 1 - spatial_id);
+	target_width = full_width / divisor;
+	if(target_width < 1)
+		target_width = 1;
+	moq_loc_svc_fit_dimensions(full_width, full_height, target_width, width, height);
+}
+
+int moq_loc_svc_spatial_layer_bitrate(int total_bitrate, int full_width, int full_height,
+		int spatial_layers, int spatial_id) {
+	int total_pixels = 0, layer_pixels = 0, w = 0, h = 0, s = 0;
+	if(total_bitrate <= 0 || spatial_layers < 1)
+		return total_bitrate;
+	if(spatial_id < 0)
+		spatial_id = 0;
+	if(spatial_id >= spatial_layers)
+		spatial_id = spatial_layers - 1;
+	for(s = 0; s < spatial_layers; s++) {
+		moq_loc_svc_spatial_layer_dimensions(full_width, full_height, spatial_layers, s, &w, &h);
+		total_pixels += w * h;
+	}
+	moq_loc_svc_spatial_layer_dimensions(full_width, full_height, spatial_layers, spatial_id, &w, &h);
+	layer_pixels = w * h;
+	if(total_pixels <= 0 || layer_pixels <= 0)
+		return total_bitrate / spatial_layers;
+	return (int)((double)total_bitrate * (double)layer_pixels / (double)total_pixels);
+}
+
+gboolean moq_loc_svc_layer_within_send_limits(const moq_loc_svc_config *cfg,
+		const moq_loc_svc_layer *layer) {
+	if(cfg == NULL || !cfg->enabled || layer == NULL)
+		return TRUE;
+	if(layer->temporal_id > (uint8_t)cfg->max_send_temporal_layer)
+		return FALSE;
+	if(layer->spatial_id > (uint8_t)cfg->max_send_spatial_layer)
 		return FALSE;
 	return TRUE;
 }
@@ -271,6 +372,17 @@ int moq_loc_svc_object_temporal_layer(imquic_moq_object *object) {
 	return temporal;
 }
 
+int moq_loc_svc_object_spatial_layer(imquic_moq_object *object) {
+	moq_loc_svc_layer layer = { 0 };
+	uint8_t spatial = 0, temporal = 0;
+	if(object == NULL)
+		return 0;
+	if(moq_loc_svc_layer_from_properties(object->properties, &layer))
+		return layer.spatial_id;
+	moq_loc_svc_unpack_subgroup(object->subgroup_id, &spatial, &temporal);
+	return spatial;
+}
+
 gboolean moq_loc_svc_object_within_layer(imquic_demo_video_codec codec, imquic_moq_object *object,
 		int max_temporal_layer, int max_spatial_layer) {
 	if(object == NULL)
@@ -310,15 +422,35 @@ static double moq_loc_svc_abr_clamp01(double value) {
 	return value;
 }
 
-moq_loc_svc_abr *moq_loc_svc_abr_create(int temporal_layers) {
+static int moq_loc_svc_abr_target_max_layer(int layer_count, double stress) {
+	int max_idx = 0, target_max = 0;
+	if(layer_count < 1)
+		return 0;
+	max_idx = layer_count - 1;
+	target_max = max_idx - (int)(stress * max_idx + 0.49);
+	if(target_max < 0)
+		target_max = 0;
+	if(target_max > max_idx)
+		target_max = max_idx;
+	return target_max;
+}
+
+moq_loc_svc_abr *moq_loc_svc_abr_create(int temporal_layers, int spatial_layers) {
 	moq_loc_svc_abr *abr = g_malloc0(sizeof(moq_loc_svc_abr));
 	if(temporal_layers < 2)
 		temporal_layers = 2;
 	if(temporal_layers > MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS)
 		temporal_layers = MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS;
+	if(spatial_layers < 1)
+		spatial_layers = 1;
+	if(spatial_layers > MOQ_LOC_SVC_MAX_SPATIAL_LAYERS)
+		spatial_layers = MOQ_LOC_SVC_MAX_SPATIAL_LAYERS;
 	abr->temporal_layers = temporal_layers;
+	abr->spatial_layers = spatial_layers;
 	abr->max_temporal_layer = temporal_layers - 1;
-	abr->upgrade_holdoff = 0;
+	abr->max_spatial_layer = spatial_layers - 1;
+	abr->temporal_upgrade_holdoff = 0;
+	abr->spatial_upgrade_holdoff = 0;
 	imquic_mutex_init(&abr->mutex);
 	return abr;
 }
@@ -344,12 +476,26 @@ void moq_loc_svc_abr_set_temporal_layers(moq_loc_svc_abr *abr, int temporal_laye
 	imquic_mutex_unlock(&abr->mutex);
 }
 
+void moq_loc_svc_abr_set_spatial_layers(moq_loc_svc_abr *abr, int spatial_layers) {
+	if(abr == NULL)
+		return;
+	if(spatial_layers < 1)
+		spatial_layers = 1;
+	if(spatial_layers > MOQ_LOC_SVC_MAX_SPATIAL_LAYERS)
+		spatial_layers = MOQ_LOC_SVC_MAX_SPATIAL_LAYERS;
+	imquic_mutex_lock(&abr->mutex);
+	abr->spatial_layers = spatial_layers;
+	if(abr->max_spatial_layer >= spatial_layers)
+		abr->max_spatial_layer = spatial_layers - 1;
+	imquic_mutex_unlock(&abr->mutex);
+}
+
 void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
 		uint64_t send_ok, uint64_t send_fail, double media_loss_rate) {
 	imquic_path_quality pq = { 0 };
 	double loss_rate = 0.0, stress = 0.0;
 	uint64_t delta_sent = 0, delta_lost = 0, delta_ok = 0, delta_fail = 0;
-	int max_idx = 0, target_max = 0, prev_max = 0;
+	int prev_temporal = 0, prev_spatial = 0;
 
 	if(abr == NULL)
 		return;
@@ -381,37 +527,57 @@ void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
 	if(stress > 1.0)
 		stress = 1.0;
 
-	max_idx = abr->temporal_layers - 1;
-	target_max = max_idx - (int)(stress * max_idx + 0.49);
-	if(target_max < 0)
-		target_max = 0;
-	if(target_max > max_idx)
-		target_max = max_idx;
-
-	prev_max = abr->max_temporal_layer;
-	if(target_max < prev_max) {
-		abr->max_temporal_layer = target_max;
-		abr->upgrade_holdoff = 4;
-	} else if(target_max > prev_max) {
-		if(abr->upgrade_holdoff > 0)
-			abr->upgrade_holdoff--;
-		else {
-			abr->max_temporal_layer = target_max;
-			abr->upgrade_holdoff = 4;
-		}
-	} else {
-		if(abr->upgrade_holdoff > 0)
-			abr->upgrade_holdoff--;
-	}
-
 	abr->stress = stress;
 	abr->loss_rate = loss_rate;
-	if(prev_max != abr->max_temporal_layer) {
-		IMQUIC_LOG(IMQUIC_LOG_INFO,
-			"SVC ABR max temporal layer %d -> %d (stress=%.2f, loss=%.1f%%, RTT=%"SCNu64"ms, jitter=%"SCNu64"ms)\n",
-			prev_max, abr->max_temporal_layer, stress, loss_rate * 100.0,
-			pq.rtt_us / 1000, pq.rtt_jitter_us / 1000);
+
+	prev_temporal = abr->max_temporal_layer;
+	if(abr->temporal_layers >= 2) {
+		int target_max = moq_loc_svc_abr_target_max_layer(abr->temporal_layers, stress);
+		if(target_max < abr->max_temporal_layer) {
+			abr->max_temporal_layer = target_max;
+			abr->temporal_upgrade_holdoff = 4;
+		} else if(target_max > abr->max_temporal_layer) {
+			if(abr->temporal_upgrade_holdoff > 0)
+				abr->temporal_upgrade_holdoff--;
+			else {
+				abr->max_temporal_layer = target_max;
+				abr->temporal_upgrade_holdoff = 4;
+			}
+		} else if(abr->temporal_upgrade_holdoff > 0) {
+			abr->temporal_upgrade_holdoff--;
+		}
+		if(prev_temporal != abr->max_temporal_layer) {
+			IMQUIC_LOG(IMQUIC_LOG_INFO,
+				"SVC ABR max temporal layer %d -> %d (stress=%.2f, loss=%.1f%%, RTT=%"SCNu64"ms, jitter=%"SCNu64"ms)\n",
+				prev_temporal, abr->max_temporal_layer, stress, loss_rate * 100.0,
+				pq.rtt_us / 1000, pq.rtt_jitter_us / 1000);
+		}
 	}
+
+	prev_spatial = abr->max_spatial_layer;
+	if(abr->spatial_layers >= 2) {
+		int target_max = moq_loc_svc_abr_target_max_layer(abr->spatial_layers, stress);
+		if(target_max < abr->max_spatial_layer) {
+			abr->max_spatial_layer = target_max;
+			abr->spatial_upgrade_holdoff = 4;
+		} else if(target_max > abr->max_spatial_layer) {
+			if(abr->spatial_upgrade_holdoff > 0)
+				abr->spatial_upgrade_holdoff--;
+			else {
+				abr->max_spatial_layer = target_max;
+				abr->spatial_upgrade_holdoff = 4;
+			}
+		} else if(abr->spatial_upgrade_holdoff > 0) {
+			abr->spatial_upgrade_holdoff--;
+		}
+		if(prev_spatial != abr->max_spatial_layer) {
+			IMQUIC_LOG(IMQUIC_LOG_INFO,
+				"SVC ABR max spatial layer %d -> %d (stress=%.2f, loss=%.1f%%, RTT=%"SCNu64"ms, jitter=%"SCNu64"ms)\n",
+				prev_spatial, abr->max_spatial_layer, stress, loss_rate * 100.0,
+				pq.rtt_us / 1000, pq.rtt_jitter_us / 1000);
+		}
+	}
+
 	imquic_mutex_unlock(&abr->mutex);
 }
 
@@ -421,6 +587,16 @@ int moq_loc_svc_abr_get_max_temporal_layer(const moq_loc_svc_abr *abr) {
 		return 0;
 	imquic_mutex_lock((imquic_mutex *)&abr->mutex);
 	max_layer = abr->max_temporal_layer;
+	imquic_mutex_unlock((imquic_mutex *)&abr->mutex);
+	return max_layer;
+}
+
+int moq_loc_svc_abr_get_max_spatial_layer(const moq_loc_svc_abr *abr) {
+	int max_layer = 0;
+	if(abr == NULL)
+		return 0;
+	imquic_mutex_lock((imquic_mutex *)&abr->mutex);
+	max_layer = abr->max_spatial_layer;
 	imquic_mutex_unlock((imquic_mutex *)&abr->mutex);
 	return max_layer;
 }

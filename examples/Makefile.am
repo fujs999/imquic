@@ -119,6 +119,7 @@ imquic_moq_loc_send_SOURCES = \
 	moq-loc-abr.c \
 	moq-loc-abr.h \
 	moq-loc-svc.c \
+	moq-loc-svc-encode.c \
 	moq-loc-svc.h \
 	moq-loc-send-options.c \
 	moq-loc-send-options.h \
@@ -210,6 +211,7 @@ imquic_roq_sender_SOURCES += \
 	moq-loc-abr.c \
 	moq-loc-abr.h \
 	moq-loc-svc.c \
+	moq-loc-svc-encode.c \
 	moq-loc-svc.h \
 	moq-utils.c \
 	moq-utils.h

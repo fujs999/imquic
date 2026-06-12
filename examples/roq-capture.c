@@ -47,8 +47,12 @@ static GThread *audio_thread = NULL;
 static AVFormatContext *webcam_fmt = NULL;
 static unsigned int video_stream = 0;
 static AVCodecContext *webcam_ctx = NULL, *videoenc_ctx = NULL;
+static AVCodecContext *svc_spatial_enc[MOQ_LOC_SVC_MAX_SPATIAL_LAYERS] = { 0 };
 static const AVCodec *video_codec = NULL;
 static struct SwsContext *sws = NULL;
+static struct SwsContext *svc_spatial_sws[MOQ_LOC_SVC_MAX_SPATIAL_LAYERS] = { 0 };
+static int svc_spatial_enc_width[MOQ_LOC_SVC_MAX_SPATIAL_LAYERS] = { 0 };
+static int svc_spatial_enc_height[MOQ_LOC_SVC_MAX_SPATIAL_LAYERS] = { 0 };
 static GThread *video_capture_thread = NULL, *video_enc_thread = NULL;
 static AVFrame *latest_frame = NULL;
 static imquic_mutex frame_mutex = IMQUIC_MUTEX_INITIALIZER;
@@ -68,22 +72,31 @@ static int64_t video_input_pts = 0;
 static gboolean roq_capture_emit_rtp(uint8_t *rtp, size_t rtp_len, void *user_data);
 static void roq_capture_apply_svc_send_layer(void);
 
-static void roq_capture_send_video_packet(AVPacket *packet, int target_fps) {
+static void roq_capture_send_video_packet(AVPacket *packet, int target_fps,
+		const moq_loc_svc_layer *layer_override) {
 	gboolean kf = (packet->flags & AV_PKT_FLAG_KEY);
 	moq_loc_svc_layer layer = { 0 };
 	gboolean svc = moq_loc_svc_is_svc_codec(video_codec_id);
 	if(svc) {
 		roq_capture_apply_svc_send_layer();
-		if(moq_loc_svc_parse_packet(video_codec_id, packet->data, (size_t)packet->size, FALSE, &layer) < 0) {
+		if(layer_override != NULL) {
+			layer = *layer_override;
+			if(moq_loc_svc_parse_packet(video_codec_id, packet->data, (size_t)packet->size, FALSE, &layer) >= 0) {
+				layer.spatial_id = layer_override->spatial_id;
+				if(!layer_override->is_keyframe)
+					layer.is_keyframe = kf;
+			}
+		} else if(moq_loc_svc_parse_packet(video_codec_id, packet->data, (size_t)packet->size, FALSE, &layer) < 0) {
 			layer.temporal_id = 0;
 			layer.spatial_id = 0;
 			layer.is_keyframe = kf;
 		} else if(!layer.is_keyframe) {
 			layer.is_keyframe = kf;
 		}
-		if(layer.temporal_id > svc_cfg.max_send_temporal_layer) {
-			IMQUIC_LOG(IMQUIC_LOG_VERB, "Dropping SVC layer T%d (max=%d)\n",
-				layer.temporal_id, svc_cfg.max_send_temporal_layer);
+		if(!moq_loc_svc_layer_within_send_limits(&svc_cfg, &layer)) {
+			IMQUIC_LOG(IMQUIC_LOG_VERB, "Dropping SVC layer S%d T%d (max S=%d T=%d)\n",
+				layer.spatial_id, layer.temporal_id,
+				svc_cfg.max_send_spatial_layer, svc_cfg.max_send_temporal_layer);
 			return;
 		}
 	}
@@ -99,10 +112,13 @@ static void roq_capture_send_video_packet(AVPacket *packet, int target_fps) {
 	}
 }
 
-static void roq_capture_drain_video_encoder(int target_fps) {
+static void roq_capture_drain_video_encoder_ctx(AVCodecContext *ctx, int target_fps,
+		const moq_loc_svc_layer *layer_override) {
 	AVPacket packet = { 0 };
+	if(ctx == NULL)
+		return;
 	while(TRUE) {
-		int ret = avcodec_receive_packet(videoenc_ctx, &packet);
+		int ret = avcodec_receive_packet(ctx, &packet);
 		if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
 			break;
 		if(ret < 0) {
@@ -110,8 +126,75 @@ static void roq_capture_drain_video_encoder(int target_fps) {
 				ret, av_err2str(ret));
 			break;
 		}
-		roq_capture_send_video_packet(&packet, target_fps);
+		roq_capture_send_video_packet(&packet, target_fps, layer_override);
 		av_packet_unref(&packet);
+	}
+}
+
+static void roq_capture_drain_video_encoder(int target_fps) {
+	if(moq_loc_svc_use_multi_spatial_encode(&svc_cfg)) {
+		int s = 0;
+		for(s = 0; s < svc_cfg.spatial_layers; s++) {
+			moq_loc_svc_layer layer = { 0 };
+			layer.spatial_id = (uint8_t)s;
+			if(svc_spatial_enc[s] != NULL)
+				roq_capture_drain_video_encoder_ctx(svc_spatial_enc[s], target_fps, &layer);
+		}
+		return;
+	}
+	roq_capture_drain_video_encoder_ctx(videoenc_ctx, target_fps, NULL);
+}
+
+static void roq_capture_encode_spatial_layers(AVFrame *source, int target_fps, gboolean force_kf) {
+	int s = 0, ret = 0;
+	if(source == NULL || !moq_loc_svc_use_multi_spatial_encode(&svc_cfg))
+		return;
+	for(s = 0; s < svc_cfg.spatial_layers; s++) {
+		AVCodecContext *ctx = svc_spatial_enc[s];
+		moq_loc_svc_layer layer_override = { 0 };
+		AVFrame *scaled = NULL;
+		if(ctx == NULL)
+			continue;
+		layer_override.spatial_id = (uint8_t)s;
+		if(svc_spatial_sws[s] == NULL ||
+				svc_spatial_enc_width[s] != ctx->width ||
+				svc_spatial_enc_height[s] != ctx->height) {
+			if(svc_spatial_sws[s] != NULL)
+				sws_freeContext(svc_spatial_sws[s]);
+			svc_spatial_sws[s] = sws_getContext(source->width, source->height, source->format,
+				ctx->width, ctx->height, ctx->pix_fmt, SWS_BICUBIC, NULL, NULL, NULL);
+		}
+		if(svc_spatial_sws[s] == NULL)
+			continue;
+		scaled = av_frame_alloc();
+		if(scaled == NULL)
+			continue;
+		scaled->format = ctx->pix_fmt;
+		scaled->width = ctx->width;
+		scaled->height = ctx->height;
+		ret = av_frame_get_buffer(scaled, 32);
+		if(ret < 0) {
+			av_frame_free(&scaled);
+			continue;
+		}
+		sws_scale(svc_spatial_sws[s], (const uint8_t * const*)source->data, source->linesize,
+			0, source->height, scaled->data, scaled->linesize);
+		if(force_kf && s == 0)
+			scaled->pict_type = AV_PICTURE_TYPE_I;
+		else
+			scaled->pict_type = AV_PICTURE_TYPE_NONE;
+		scaled->pts = video_input_pts;
+		if(scaled->color_range == AVCOL_RANGE_UNSPECIFIED)
+			scaled->color_range = AVCOL_RANGE_MPEG;
+		ret = avcodec_send_frame(ctx, scaled);
+		if(ret == AVERROR(EAGAIN)) {
+			roq_capture_drain_video_encoder_ctx(ctx, target_fps, &layer_override);
+			ret = avcodec_send_frame(ctx, scaled);
+		}
+		av_frame_free(&scaled);
+		if(ret < 0)
+			continue;
+		roq_capture_drain_video_encoder_ctx(ctx, target_fps, &layer_override);
 	}
 }
 
@@ -126,76 +209,72 @@ static gboolean roq_capture_emit_rtp(uint8_t *rtp, size_t rtp_len, void *user_da
 	return TRUE;
 }
 
-static gboolean roq_capture_encoder_option_available(AVCodecContext *ctx, const char *name) {
-	if(ctx == NULL || ctx->priv_data == NULL || name == NULL)
-		return FALSE;
-	return av_opt_find(ctx->priv_data, name, NULL, 0, AV_OPT_SEARCH_CHILDREN) != NULL;
-}
-
-static int roq_capture_build_vp9_ts_parameters(char *buf, size_t buflen, int temporal_layers, int total_bitrate_bps) {
-	char br[128], dec[64];
-	int total_kbps = 0, i = 0, br_len = 0, dec_len = 0;
-	if(buf == NULL || buflen == 0 || temporal_layers < 2)
-		return -1;
-	total_kbps = total_bitrate_bps / 1024;
-	if(total_kbps < temporal_layers)
-		total_kbps = temporal_layers;
-	br[0] = '\0';
-	dec[0] = '\0';
-	for(i = 0; i < temporal_layers; i++) {
-		int layer_br = total_kbps / (1 << (temporal_layers - 1 - i));
-		int dec_val = 1 << (temporal_layers - 1 - i);
-		br_len += g_snprintf(br + br_len, sizeof(br) - br_len, "%s%d", i ? "," : "", layer_br);
-		dec_len += g_snprintf(dec + dec_len, sizeof(dec) - dec_len, "%s%d", i ? "," : "", dec_val);
-	}
-	return g_snprintf(buf, buflen,
-		"ts_number_layers=%d:ts_target_bitrate=%s:ts_rate_decimator=%s:ts_layering_mode=3",
-		temporal_layers, br, dec);
-}
-
-static void roq_capture_configure_svc_encoder(AVCodecContext *ctx) {
-	char layers[8], ts_buf[256];
-	if(ctx == NULL || !svc_cfg.enabled)
-		return;
-	if(video_codec_id == DEMO_H264_SVC) {
-		av_opt_set(ctx->priv_data, "profile", "high", AV_OPT_SEARCH_CHILDREN);
-		av_opt_set_int(ctx->priv_data, "allow_skip_frames", 1, AV_OPT_SEARCH_CHILDREN);
-		g_snprintf(layers, sizeof(layers), "%d", svc_cfg.temporal_layers);
-		av_opt_set(ctx->priv_data, "slices", layers, AV_OPT_SEARCH_CHILDREN);
-	} else if(video_codec_id == DEMO_VP9_SVC) {
-		av_opt_set(ctx->priv_data, "lag-in-frames", "25", AV_OPT_SEARCH_CHILDREN);
-		av_opt_set_int(ctx->priv_data, "auto-alt-ref", 1, AV_OPT_SEARCH_CHILDREN);
-		av_opt_set(ctx->priv_data, "temporal-aq", "1", AV_OPT_SEARCH_CHILDREN);
-		if(roq_capture_encoder_option_available(ctx, "ts-parameters")) {
-			if(roq_capture_build_vp9_ts_parameters(ts_buf, sizeof(ts_buf),
-					svc_cfg.temporal_layers, (int)ctx->bit_rate) < 0 ||
-					av_opt_set(ctx->priv_data, "ts-parameters", ts_buf, AV_OPT_SEARCH_CHILDREN) < 0) {
-				IMQUIC_LOG(IMQUIC_LOG_WARN, "Failed to configure VP9 SVC via ts-parameters\n");
-			} else {
-				IMQUIC_LOG(IMQUIC_LOG_INFO, "VP9 SVC temporal scaling: %s\n", ts_buf);
-			}
-		} else if(roq_capture_encoder_option_available(ctx, "vp9-temporal-layers")) {
-			IMQUIC_LOG(IMQUIC_LOG_WARN,
-				"VP9 SVC: ts-parameters not available, falling back to legacy vp9-temporal-layers\n");
-			g_snprintf(layers, sizeof(layers), "%d", svc_cfg.temporal_layers);
-			if(av_opt_set(ctx->priv_data, "vp9-temporal-layers", layers, AV_OPT_SEARCH_CHILDREN) < 0)
-				IMQUIC_LOG(IMQUIC_LOG_WARN, "Failed to set vp9-temporal-layers for VP9 SVC\n");
-		} else {
-			IMQUIC_LOG(IMQUIC_LOG_WARN,
-				"VP9 SVC: libvpx-vp9 lacks ts-parameters and vp9-temporal-layers, temporal scalability disabled\n");
-		}
-	}
-}
-
 static void roq_capture_svc_encoder_extra_config(AVCodecContext *ctx, void *user_data) {
 	(void)user_data;
 	if(moq_loc_svc_is_svc_codec(video_codec_id))
-		roq_capture_configure_svc_encoder(ctx);
+		moq_loc_svc_configure_encoder(ctx, &svc_cfg);
+}
+
+static void roq_capture_destroy_svc_spatial_encoders(void) {
+	int i = 0;
+	for(i = 0; i < MOQ_LOC_SVC_MAX_SPATIAL_LAYERS; i++) {
+		if(svc_spatial_sws[i] != NULL) {
+			sws_freeContext(svc_spatial_sws[i]);
+			svc_spatial_sws[i] = NULL;
+		}
+		if(svc_spatial_enc[i] != NULL) {
+			avcodec_free_context(&svc_spatial_enc[i]);
+			svc_spatial_enc[i] = NULL;
+		}
+		svc_spatial_enc_width[i] = 0;
+		svc_spatial_enc_height[i] = 0;
+	}
+}
+
+static int roq_capture_open_svc_spatial_encoder(int spatial_id, int width, int height, int fps, int bitrate) {
+	if(spatial_id < 0 || spatial_id >= MOQ_LOC_SVC_MAX_SPATIAL_LAYERS)
+		return -1;
+	if(svc_spatial_enc[spatial_id] != NULL &&
+			svc_spatial_enc_width[spatial_id] == width &&
+			svc_spatial_enc_height[spatial_id] == height)
+		return 0;
+	if(svc_spatial_enc[spatial_id] != NULL) {
+		avcodec_free_context(&svc_spatial_enc[spatial_id]);
+		svc_spatial_enc[spatial_id] = NULL;
+	}
+	if(imquic_demo_open_video_encoder(&svc_spatial_enc[spatial_id], video_codec_id, width, height, fps, bitrate, FALSE,
+			roq_capture_svc_encoder_extra_config, NULL, &video_codec, &video_enc_vendor) < 0) {
+		return -1;
+	}
+	svc_spatial_enc_width[spatial_id] = width;
+	svc_spatial_enc_height[spatial_id] = height;
+	return 0;
+}
+
+static int roq_capture_init_svc_spatial_encoders(int full_width, int full_height, int fps, int total_bitrate) {
+	int s = 0, w = 0, h = 0, br = 0;
+	if(!moq_loc_svc_use_multi_spatial_encode(&svc_cfg))
+		return 0;
+	for(s = 0; s < svc_cfg.spatial_layers; s++) {
+		moq_loc_svc_spatial_layer_dimensions(full_width, full_height, svc_cfg.spatial_layers, s, &w, &h);
+		br = moq_loc_svc_spatial_layer_bitrate(total_bitrate, full_width, full_height,
+			svc_cfg.spatial_layers, s);
+		if(roq_capture_open_svc_spatial_encoder(s, w, h, fps, br) < 0)
+			return -1;
+	}
+	enc_target_width = full_width;
+	enc_target_height = full_height;
+	enc_target_fps = fps;
+	if(svc_spatial_enc[svc_cfg.spatial_layers - 1] != NULL)
+		enc_target_pix_fmt = imquic_demo_encoder_pix_fmt(svc_spatial_enc[svc_cfg.spatial_layers - 1]);
+	return 0;
 }
 
 static int roq_capture_open_video_encoder(int width, int height, int fps, int bitrate) {
 	if(width <= 0 || height <= 0 || fps <= 0 || bitrate <= 0)
 		return -1;
+	if(moq_loc_svc_use_multi_spatial_encode(&svc_cfg))
+		return roq_capture_init_svc_spatial_encoders(width, height, fps, bitrate);
 	if(imquic_demo_open_video_encoder(&videoenc_ctx, video_codec_id, width, height, fps, bitrate, FALSE,
 			roq_capture_svc_encoder_extra_config, NULL, &video_codec, &video_enc_vendor) < 0) {
 		return -1;
@@ -275,6 +354,8 @@ static void roq_capture_apply_svc_send_layer(void) {
 	if(!svc_cfg.enabled)
 		return;
 	svc_cfg.max_send_temporal_layer = roq_capture_effective_max_temporal_layer();
+	if(svc_abr != NULL)
+		svc_cfg.max_send_spatial_layer = moq_loc_svc_abr_get_max_spatial_layer(svc_abr);
 }
 
 static int roq_capture_create_audio(void) {
@@ -398,6 +479,7 @@ int roq_capture_init(const roq_capture_config *config, roq_capture_rtp_cb cb, vo
 			if(cfg.svc_spatial_layers > 0)
 				svc_cfg.spatial_layers = cfg.svc_spatial_layers;
 			svc_cfg.max_send_temporal_layer = svc_cfg.temporal_layers - 1;
+			svc_cfg.max_send_spatial_layer = svc_cfg.spatial_layers - 1;
 			if(!moq_loc_svc_config_validate(&svc_cfg)) {
 				IMQUIC_LOG(IMQUIC_LOG_ERR, "Invalid SVC configuration\n");
 				return -1;
@@ -454,6 +536,7 @@ void roq_capture_destroy(void) {
 		avcodec_free_context(&webcam_ctx);
 	if(videoenc_ctx != NULL)
 		avcodec_free_context(&videoenc_ctx);
+	roq_capture_destroy_svc_spatial_encoders();
 	if(sws != NULL) {
 		sws_freeContext(sws);
 		sws = NULL;
@@ -528,7 +611,10 @@ static void *roq_capture_video_capture_thread(void *user_data) {
 			g_usleep(100000);
 			continue;
 		}
-		{
+		if(moq_loc_svc_use_multi_spatial_encode(&svc_cfg)) {
+			scale_width = cfg.width;
+			scale_height = cfg.height;
+		} else {
 			int target_width = cfg.width;
 			if(abr != NULL) {
 				moq_loc_abr_config abr_cfg = { 0 };
@@ -536,7 +622,6 @@ static void *roq_capture_video_capture_thread(void *user_data) {
 				if(abr_cfg.width > 0)
 					target_width = abr_cfg.width;
 			}
-			/* Keep scaling aligned with the active encoder dimensions */
 			if(enc_target_width > 0)
 				target_width = enc_target_width;
 			moq_loc_abr_fit_dimensions(cfg.width, cfg.height, target_width,
@@ -635,7 +720,11 @@ static void *roq_capture_video_enc_thread(void *user_data) {
 		roq_capture_drain_video_encoder(target_fps);
 
 		imquic_mutex_lock(&frame_mutex);
-		if(latest_frame == NULL || videoenc_ctx == NULL) {
+		if(latest_frame == NULL) {
+			imquic_mutex_unlock(&frame_mutex);
+			continue;
+		}
+		if(!moq_loc_svc_use_multi_spatial_encode(&svc_cfg) && videoenc_ctx == NULL) {
 			imquic_mutex_unlock(&frame_mutex);
 			continue;
 		}
@@ -649,13 +738,19 @@ static void *roq_capture_video_enc_thread(void *user_data) {
 			IMQUIC_LOG(IMQUIC_LOG_ERR, "Failed to clone video frame for encoding\n");
 			continue;
 		}
-		if(g_atomic_int_get(&force_video_keyframe)) {
-			encode_frame->pict_type = AV_PICTURE_TYPE_I;
+		gboolean force_kf = g_atomic_int_get(&force_video_keyframe) ? TRUE : FALSE;
+		if(force_kf)
 			g_atomic_int_set(&force_video_keyframe, 0);
-		} else {
-			encode_frame->pict_type = AV_PICTURE_TYPE_NONE;
-		}
 		encode_frame->pts = video_input_pts++;
+		if(moq_loc_svc_use_multi_spatial_encode(&svc_cfg)) {
+			roq_capture_encode_spatial_layers(encode_frame, target_fps, force_kf);
+			av_frame_free(&encode_frame);
+			continue;
+		}
+		if(force_kf)
+			encode_frame->pict_type = AV_PICTURE_TYPE_I;
+		else
+			encode_frame->pict_type = AV_PICTURE_TYPE_NONE;
 		if(encode_frame->color_range == AVCOL_RANGE_UNSPECIFIED)
 			encode_frame->color_range = AVCOL_RANGE_MPEG;
 

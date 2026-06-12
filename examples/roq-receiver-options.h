@@ -45,6 +45,7 @@ typedef struct demo_options {
 	int video_pt;
 	const char *video_codec;
 	int svc_temporal_layers;
+	int svc_spatial_layers;
 	int svc_max_temporal_layer;
 	int svc_max_spatial_layer;
 	gboolean no_svc_adaptive;

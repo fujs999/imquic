@@ -51,8 +51,11 @@ static imquic_demo_video_codec video_codec_id = DEMO_H264_ANNEXB;
 static int svc_max_temporal_layer = -1;
 static int svc_max_spatial_layer = -1;
 static int svc_max_temporal_cap = -1;
+static int svc_max_spatial_cap = -1;
 static int svc_temporal_layers = 2;
+static int svc_spatial_layers = 1;
 static int svc_current_temporal_layer = 0;
+static int svc_current_spatial_layer = 0;
 static moq_loc_svc_abr *svc_abr = NULL;
 static gboolean svc_adaptive_enabled = FALSE;
 static roq_display_svc_feedback_cb svc_feedback_cb = NULL;
@@ -597,7 +600,9 @@ static void roq_display_render_video_overlay(SDL_Renderer *r) {
 	line_count++;
 	if(moq_loc_svc_is_svc_codec(video_codec_id)) {
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]),
-			"SVC layer: T%d (max=%2d)", svc_current_temporal_layer,
+			"SVC layer: S%d T%d (max S=%d T=%d)",
+			svc_current_spatial_layer, svc_current_temporal_layer,
+			svc_max_spatial_layer >= 0 ? svc_max_spatial_layer : svc_spatial_layers - 1,
 			svc_max_temporal_layer >= 0 ? svc_max_temporal_layer : svc_temporal_layers - 1);
 	} else {
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "SVC layer:    n/a");
@@ -625,6 +630,7 @@ static gboolean roq_display_svc_within_limits(const uint8_t *data, size_t len) {
 	if(moq_loc_svc_parse_packet(video_codec_id, data, len, FALSE, &layer) < 0)
 		return TRUE;
 	svc_current_temporal_layer = layer.temporal_id;
+	svc_current_spatial_layer = layer.spatial_id;
 	if(svc_max_temporal_layer >= 0 && layer.temporal_id > (uint8_t)svc_max_temporal_layer)
 		return FALSE;
 	if(svc_max_spatial_layer >= 0 && layer.spatial_id > (uint8_t)svc_max_spatial_layer)
@@ -637,10 +643,13 @@ static void roq_display_update_svc_abr(void) {
 	if(!moq_loc_svc_is_svc_codec(video_codec_id) || cfg.no_svc_adaptive || svc_max_temporal_cap >= 0)
 		return;
 	if(svc_abr == NULL) {
-		svc_abr = moq_loc_svc_abr_create(svc_temporal_layers);
+		svc_abr = moq_loc_svc_abr_create(svc_temporal_layers, svc_spatial_layers);
 		svc_adaptive_enabled = TRUE;
 		svc_max_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
-		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive decode enabled (%d temporal layers)\n", svc_temporal_layers);
+		if(svc_max_spatial_cap < 0)
+			svc_max_spatial_layer = moq_loc_svc_abr_get_max_spatial_layer(svc_abr);
+		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive decode enabled (%d temporal, %d spatial layers)\n",
+			svc_temporal_layers, svc_spatial_layers);
 		roq_display_maybe_send_svc_feedback();
 		return;
 	}
@@ -651,8 +660,12 @@ static void roq_display_update_svc_abr(void) {
 				(double)(rtp_packets_recv_display + rtp_packets_lost_display);
 		moq_loc_svc_abr_update(svc_abr, stats_conn, 0, 0, media_loss);
 		svc_max_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
+		if(svc_max_spatial_cap < 0)
+			svc_max_spatial_layer = moq_loc_svc_abr_get_max_spatial_layer(svc_abr);
 		if(svc_max_temporal_cap >= 0 && svc_max_temporal_layer > svc_max_temporal_cap)
 			svc_max_temporal_layer = svc_max_temporal_cap;
+		if(svc_max_spatial_cap >= 0 && svc_max_spatial_layer > svc_max_spatial_cap)
+			svc_max_spatial_layer = svc_max_spatial_cap;
 	}
 	imquic_mutex_unlock(&stats_mutex);
 	roq_display_maybe_send_svc_feedback();
@@ -872,6 +885,7 @@ int roq_display_init(const roq_display_config *config) {
 	if(video_codec_id == DEMO_UNKOWN)
 		video_codec_id = DEMO_H264_ANNEXB;
 	svc_max_temporal_cap = cfg.svc_max_temporal_layer;
+	svc_max_spatial_cap = cfg.svc_max_spatial_layer;
 	svc_max_spatial_layer = cfg.svc_max_spatial_layer;
 	if(svc_max_temporal_cap >= 0)
 		svc_max_temporal_layer = svc_max_temporal_cap;
@@ -884,9 +898,19 @@ int roq_display_init(const roq_display_config *config) {
 			svc_temporal_layers = 2;
 		if(svc_temporal_layers > MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS)
 			svc_temporal_layers = MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS;
+		if(cfg.svc_spatial_layers > 0)
+			svc_spatial_layers = cfg.svc_spatial_layers;
+		else if(svc_max_spatial_cap >= 0)
+			svc_spatial_layers = svc_max_spatial_cap + 1;
+		if(svc_spatial_layers < 1)
+			svc_spatial_layers = 1;
+		if(svc_spatial_layers > MOQ_LOC_SVC_MAX_SPATIAL_LAYERS)
+			svc_spatial_layers = MOQ_LOC_SVC_MAX_SPATIAL_LAYERS;
 		if(!cfg.no_svc_adaptive && svc_max_temporal_cap < 0) {
 			svc_adaptive_enabled = TRUE;
 			svc_max_temporal_layer = svc_temporal_layers - 1;
+			if(svc_max_spatial_cap < 0)
+				svc_max_spatial_layer = svc_spatial_layers - 1;
 		}
 	}
 
