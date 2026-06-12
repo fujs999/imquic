@@ -113,6 +113,9 @@ static imquic_mutex mutex = IMQUIC_MUTEX_INITIALIZER;
 #define IMQUIC_DEMO_AUDIO_RATE 48000
 static TTF_Font *overlay_font = NULL;
 static gboolean overlay_font_inited = FALSE;
+static int overlay_bg_w = 0;
+static int overlay_line_h = 0;
+static int overlay_fixed_lines = 0;
 static char video_codec_str[64] = { 0 };
 static uint16_t video_catalog_width = 0, video_catalog_height = 0;
 static uint8_t video_catalog_framerate = 0;
@@ -1044,12 +1047,41 @@ static const char *imquic_demo_font_paths[] = {
 };
 
 static void imquic_demo_format_bitrate(char *buf, size_t buflen, double bps) {
-	if(bps >= 1000000.0)
-		g_snprintf(buf, buflen, "%.2f Mbps", bps / 1000000.0);
-	else if(bps >= 1000.0)
-		g_snprintf(buf, buflen, "%.1f Kbps", bps / 1000.0);
+	if(bps > 0.0)
+		g_snprintf(buf, buflen, "%8.1f Kbps", bps / 1000.0);
 	else
-		g_snprintf(buf, buflen, "%.0f bps", bps);
+		g_strlcpy(buf, "     n/a", buflen);
+}
+
+static const char *imquic_demo_overlay_templates[] = {
+	"Resolution: 9999x9999",
+	"Codec: unknown codec",
+	"SVC layer: T9 (max=99, adaptive)",
+	"FPS:   99.9",
+	"Bitrate:  99999.9 Kbps",
+	"Object loss:  99999 (100.0%)",
+	"Media jitter:  999.9 ms",
+	"Stream delay:  9999 ms",
+	"RTT:  999.9 ms",
+	"QUIC jitter:  999.9 ms",
+	"Playout delay:  9999 ms",
+	NULL
+};
+
+static void imquic_demo_measure_overlay_layout(void) {
+	const char *const *tpl = imquic_demo_overlay_templates;
+	int max_w = 0, lw = 0, lh = 0, count = 0;
+
+	if(overlay_font == NULL)
+		return;
+	overlay_line_h = TTF_FontLineSkip(overlay_font);
+	for(; *tpl != NULL; tpl++) {
+		if(TTF_SizeUTF8(overlay_font, *tpl, &lw, &lh) == 0 && lw > max_w)
+			max_w = lw;
+		count++;
+	}
+	overlay_bg_w = max_w + 16;
+	overlay_fixed_lines = count;
 }
 
 static int imquic_demo_init_overlay_font(void) {
@@ -1064,6 +1096,7 @@ static int imquic_demo_init_overlay_font(void) {
 		overlay_font = TTF_OpenFont(*path, IMQUIC_DEMO_FONT_SIZE);
 		if(overlay_font != NULL) {
 			TTF_SetFontHinting(overlay_font, TTF_HINTING_LIGHT);
+			imquic_demo_measure_overlay_layout();
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "Using overlay font '%s'\n", *path);
 			return 0;
 		}
@@ -1158,17 +1191,16 @@ static void imquic_demo_render_video_overlay(SDL_Renderer *r) {
 	char line_bufs[IMQUIC_DEMO_OVERLAY_MAX_LINES][128], bitrate_str[32];
 	const char *lines[IMQUIC_DEMO_OVERLAY_MAX_LINES];
 	SDL_Rect bg = { 0 };
-	int x = 10, y = 10, line_h = 0, max_w = 0, total_h = 0;
-	int width = 0, height = 0, line_count = 0, i = 0, lw = 0, lh = 0;
+	int x = 10, y = 10, i = 0, line_count = 0;
+	int width = 0, height = 0;
 	double fps = 0, bitrate = 0;
-	uint32_t obj_lost = 0, obj_recv = 0;
+	uint32_t obj_lost = 0;
 	double obj_loss = 0, media_jitter = 0, stream_delay = 0;
 	double quic_rtt = 0, quic_jitter = 0;
 	double playout = 0;
 
-	if(overlay_font == NULL)
+	if(overlay_font == NULL || overlay_fixed_lines <= 0)
 		return;
-	line_h = TTF_FontLineSkip(overlay_font);
 	imquic_mutex_lock(&mutex);
 	if(latest_frame != NULL) {
 		width = latest_frame->width;
@@ -1179,7 +1211,6 @@ static void imquic_demo_render_video_overlay(SDL_Renderer *r) {
 	imquic_mutex_unlock(&mutex);
 	imquic_mutex_lock(&stats_mutex);
 	obj_lost = objects_lost_display;
-	obj_recv = objects_recv_display;
 	obj_loss = object_loss_rate_display;
 	media_jitter = media_jitter_display_ms;
 	stream_delay = stream_delay_display_ms;
@@ -1191,92 +1222,72 @@ static void imquic_demo_render_video_overlay(SDL_Renderer *r) {
 		width = video_catalog_width;
 	if(height <= 0 && video_catalog_height > 0)
 		height = video_catalog_height;
-	if(width <= 0 && height <= 0 && video_codec_str[0] == '\0')
-		return;
-	if(width > 0 && height > 0) {
+	if(width > 0 && height > 0)
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Resolution: %dx%d", width, height);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
-	}
-	if(video_codec_str[0] != '\0') {
+	else
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Resolution:     n/a");
+	lines[line_count] = line_bufs[line_count];
+	line_count++;
+	if(video_codec_str[0] != '\0')
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Codec: %s", video_codec_str);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
-	}
+	else
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Codec: n/a");
+	lines[line_count] = line_bufs[line_count];
+	line_count++;
 	if(moq_loc_svc_is_svc_codec(codec)) {
 		const char *mode = svc_adaptive_enabled ? "adaptive" : "fixed";
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]),
-			"SVC layer: T%d (max=%d, %s)", svc_current_temporal_layer, svc_max_temporal_layer, mode);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
+			"SVC layer: T%d (max=%2d, %s)", svc_current_temporal_layer, svc_max_temporal_layer, mode);
+	} else {
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "SVC layer:    n/a");
 	}
-	if(fps > 0.0) {
-		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "FPS: %.1f", fps);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
-	} else if(video_catalog_framerate > 0) {
-		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "FPS: %u", video_catalog_framerate);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
-	}
-	if(bitrate > 0.0) {
+	lines[line_count] = line_bufs[line_count];
+	line_count++;
+	if(fps > 0.0)
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "FPS: %5.1f", fps);
+	else if(video_catalog_framerate > 0)
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "FPS: %5u", video_catalog_framerate);
+	else
+		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "FPS:   n/a");
+	lines[line_count] = line_bufs[line_count];
+	line_count++;
+	if(bitrate > 0.0)
 		imquic_demo_format_bitrate(bitrate_str, sizeof(bitrate_str), bitrate);
-		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Bitrate: %s", bitrate_str);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
-	} else if(video_catalog_bitrate > 0) {
+	else if(video_catalog_bitrate > 0)
 		imquic_demo_format_bitrate(bitrate_str, sizeof(bitrate_str), (double)video_catalog_bitrate);
-		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Bitrate: %s", bitrate_str);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
-	}
-	if(obj_recv > 0 || obj_lost > 0) {
-		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]),
-			"Object loss: %"G_GUINT32_FORMAT" (%.1f%%)", obj_lost, obj_loss);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
-	}
-	if(media_jitter > 0.0) {
-		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Media jitter: %.1f ms", media_jitter);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
-	}
-	if(stream_delay > 0.0) {
-		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Stream delay: %.0f ms", stream_delay);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
-	}
-	if(quic_rtt > 0.0) {
-		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "RTT: %.1f ms", quic_rtt);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
-	}
-	if(quic_jitter > 0.0) {
-		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "QUIC jitter: %.1f ms", quic_jitter);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
-	}
-	if(playout > 0.0) {
-		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Playout delay: %.0f ms", playout);
-		lines[line_count] = line_bufs[line_count];
-		line_count++;
-	}
-	if(line_count == 0)
-		return;
-	for(i = 0; i < line_count; i++) {
-		if(TTF_SizeUTF8(overlay_font, lines[i], &lw, &lh) == 0 && lw > max_w)
-			max_w = lw;
-	}
-	total_h = line_count * line_h;
+	else
+		imquic_demo_format_bitrate(bitrate_str, sizeof(bitrate_str), 0);
+	g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Bitrate: %s", bitrate_str);
+	lines[line_count] = line_bufs[line_count];
+	line_count++;
+	g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]),
+		"Object loss: %5"G_GUINT32_FORMAT" (%5.1f%%)", obj_lost, obj_loss);
+	lines[line_count] = line_bufs[line_count];
+	line_count++;
+	g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Media jitter: %6.1f ms", media_jitter);
+	lines[line_count] = line_bufs[line_count];
+	line_count++;
+	g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Stream delay: %4.0f ms", stream_delay);
+	lines[line_count] = line_bufs[line_count];
+	line_count++;
+	g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "RTT: %6.1f ms", quic_rtt);
+	lines[line_count] = line_bufs[line_count];
+	line_count++;
+	g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "QUIC jitter: %6.1f ms", quic_jitter);
+	lines[line_count] = line_bufs[line_count];
+	line_count++;
+	g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Playout delay: %4.0f ms", playout);
+	lines[line_count] = line_bufs[line_count];
+	line_count++;
 	SDL_SetRenderDrawColor(r, 32, 32, 32, 255);
 	bg.x = x - 8;
 	bg.y = y - 6;
-	bg.w = max_w + 16;
-	bg.h = total_h + 12;
+	bg.w = overlay_bg_w;
+	bg.h = overlay_fixed_lines * overlay_line_h + 12;
 	SDL_RenderFillRect(r, &bg);
 	for(i = 0; i < line_count; i++) {
 		imquic_demo_draw_overlay_line(r, x, y, lines[i]);
-		y += line_h;
+		y += overlay_line_h;
 	}
 }
 
