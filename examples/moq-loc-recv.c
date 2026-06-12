@@ -381,26 +381,6 @@ static void imquic_demo_on_video_loss(void) {
 		avcodec_flush_buffers(videodec_ctx);
 }
 
-static int imquic_demo_update_video_decoder_extradata(const uint8_t *extradata, size_t extradata_size) {
-	if(videodec_ctx == NULL || extradata == NULL || extradata_size == 0)
-		return -1;
-	if(codec == DEMO_VP9 || codec == DEMO_VP9_SVC || codec == DEMO_VP8)
-		return -1;
-	av_freep(&videodec_ctx->extradata);
-	videodec_ctx->extradata_size = 0;
-	videodec_ctx->extradata = av_malloc(extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
-	if(videodec_ctx->extradata == NULL)
-		return -1;
-	memcpy(videodec_ctx->extradata, extradata, extradata_size);
-	memset(videodec_ctx->extradata + extradata_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
-	videodec_ctx->extradata_size = extradata_size;
-	avcodec_flush_buffers(videodec_ctx);
-	imquic_demo_set_video_extradata_cache(extradata, extradata_size);
-	imquic_demo_reset_video_decode_sync();
-	IMQUIC_LOG(IMQUIC_LOG_VERB, "Video extradata changed, updated decoder in-place\n");
-	return 0;
-}
-
 static void imquic_demo_destroy_video_decoder(void) {
 	if(videodec_ctx != NULL)
 		avcodec_free_context(&videodec_ctx);
@@ -426,13 +406,9 @@ static int imquic_demo_ensure_video_decoder(struct imquic_moq_property_data *loc
 	size_t extradata_size = loc_extradata ? loc_extradata->length : 0;
 
 	if(loc_extradata != NULL && imquic_demo_video_extradata_changed(extradata, extradata_size)) {
-		if(videodec_ctx != NULL && keyframe) {
-			if(imquic_demo_update_video_decoder_extradata(extradata, extradata_size) < 0) {
-				IMQUIC_LOG(IMQUIC_LOG_VERB, "In-place extradata update failed, recreating decoder\n");
-				imquic_demo_destroy_video_decoder();
-			}
-		} else if(videodec_ctx != NULL) {
-			IMQUIC_LOG(IMQUIC_LOG_VERB, "Video extradata changed, waiting for keyframe\n");
+		if(videodec_ctx != NULL) {
+			IMQUIC_LOG(IMQUIC_LOG_VERB, "Video extradata changed, recreating decoder\n");
+			imquic_demo_destroy_video_decoder();
 		}
 	}
 	if(videodec_ctx == NULL && (keyframe || codec == DEMO_AV1)) {
