@@ -291,8 +291,11 @@ gboolean moq_loc_svc_layer_should_decode(const moq_loc_svc_layer *layer,
 	int target = 0;
 	if(layer == NULL)
 		return TRUE;
-	if(spatial_layers <= 1)
+	if(spatial_layers <= 1) {
+		if(layer->spatial_id > 0)
+			return FALSE;
 		return TRUE;
+	}
 	target = moq_loc_svc_target_decode_spatial_layer(spatial_layers, max_spatial_layer);
 	return layer->spatial_id == (uint8_t)target;
 }
@@ -526,6 +529,27 @@ void moq_loc_svc_abr_set_spatial_layers(moq_loc_svc_abr *abr, int spatial_layers
 	imquic_mutex_unlock(&abr->mutex);
 }
 
+void moq_loc_svc_abr_reconfigure(moq_loc_svc_abr *abr, int temporal_layers, int spatial_layers) {
+	if(abr == NULL)
+		return;
+	if(temporal_layers < 2)
+		temporal_layers = 2;
+	if(temporal_layers > MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS)
+		temporal_layers = MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS;
+	if(spatial_layers < 1)
+		spatial_layers = 1;
+	if(spatial_layers > MOQ_LOC_SVC_MAX_SPATIAL_LAYERS)
+		spatial_layers = MOQ_LOC_SVC_MAX_SPATIAL_LAYERS;
+	imquic_mutex_lock(&abr->mutex);
+	abr->temporal_layers = temporal_layers;
+	abr->spatial_layers = spatial_layers;
+	abr->max_temporal_layer = temporal_layers - 1;
+	abr->max_spatial_layer = spatial_layers - 1;
+	abr->temporal_upgrade_holdoff = 0;
+	abr->spatial_upgrade_holdoff = 0;
+	imquic_mutex_unlock(&abr->mutex);
+}
+
 void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
 		uint64_t send_ok, uint64_t send_fail, double media_loss_rate) {
 	imquic_path_quality pq = { 0 };
@@ -615,6 +639,26 @@ void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
 	}
 
 	imquic_mutex_unlock(&abr->mutex);
+}
+
+int moq_loc_svc_abr_get_temporal_layers(const moq_loc_svc_abr *abr) {
+	int layers = 0;
+	if(abr == NULL)
+		return 0;
+	imquic_mutex_lock((imquic_mutex *)&abr->mutex);
+	layers = abr->temporal_layers;
+	imquic_mutex_unlock((imquic_mutex *)&abr->mutex);
+	return layers;
+}
+
+int moq_loc_svc_abr_get_spatial_layers(const moq_loc_svc_abr *abr) {
+	int layers = 0;
+	if(abr == NULL)
+		return 0;
+	imquic_mutex_lock((imquic_mutex *)&abr->mutex);
+	layers = abr->spatial_layers;
+	imquic_mutex_unlock((imquic_mutex *)&abr->mutex);
+	return layers;
 }
 
 int moq_loc_svc_abr_get_max_temporal_layer(const moq_loc_svc_abr *abr) {

@@ -82,8 +82,11 @@ moq_loc_svc_abr *moq_loc_svc_abr_create(int temporal_layers, int spatial_layers)
 void moq_loc_svc_abr_destroy(moq_loc_svc_abr *abr);
 void moq_loc_svc_abr_set_temporal_layers(moq_loc_svc_abr *abr, int temporal_layers);
 void moq_loc_svc_abr_set_spatial_layers(moq_loc_svc_abr *abr, int spatial_layers);
+void moq_loc_svc_abr_reconfigure(moq_loc_svc_abr *abr, int temporal_layers, int spatial_layers);
 void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
 	uint64_t send_ok, uint64_t send_fail, double media_loss_rate);
+int moq_loc_svc_abr_get_temporal_layers(const moq_loc_svc_abr *abr);
+int moq_loc_svc_abr_get_spatial_layers(const moq_loc_svc_abr *abr);
 int moq_loc_svc_abr_get_max_temporal_layer(const moq_loc_svc_abr *abr);
 int moq_loc_svc_abr_get_max_spatial_layer(const moq_loc_svc_abr *abr);
 double moq_loc_svc_abr_get_stress(const moq_loc_svc_abr *abr);

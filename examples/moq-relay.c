@@ -154,7 +154,7 @@ static void imquic_demo_track_note_svc_object(imquic_demo_moq_track *track, imqu
 
 static void imquic_demo_subscription_ensure_svc_abr(imquic_demo_moq_subscription *s) {
 	int temporal_layers = 0, spatial_layers = 0;
-	if(s == NULL || s->svc_abr != NULL || options.no_svc_adaptive || options.svc_max_temporal_layer >= 0)
+	if(s == NULL || options.no_svc_adaptive || options.svc_max_temporal_layer >= 0)
 		return;
 	if(s->track == NULL || !s->track->svc_track)
 		return;
@@ -164,7 +164,13 @@ static void imquic_demo_subscription_ensure_svc_abr(imquic_demo_moq_subscription
 		temporal_layers = 2;
 	if(spatial_layers < 1)
 		spatial_layers = 1;
-	s->svc_abr = moq_loc_svc_abr_create(temporal_layers, spatial_layers);
+	if(s->svc_abr == NULL) {
+		s->svc_abr = moq_loc_svc_abr_create(temporal_layers, spatial_layers);
+		return;
+	}
+	if(moq_loc_svc_abr_get_temporal_layers(s->svc_abr) != temporal_layers ||
+			moq_loc_svc_abr_get_spatial_layers(s->svc_abr) != spatial_layers)
+		moq_loc_svc_abr_reconfigure(s->svc_abr, temporal_layers, spatial_layers);
 }
 
 static int imquic_demo_subscription_max_temporal(imquic_demo_moq_subscription *s) {
@@ -290,6 +296,7 @@ static imquic_demo_moq_track *imquic_demo_moq_track_create(imquic_demo_moq_publi
 	t->track_name = g_strdup(track_name);
 	t->pending = TRUE;
 	t->track_alias_valid = FALSE;
+	t->svc_temporal_layers = 2;
 	t->svc_spatial_layers = 1;
 	imquic_mutex_init(&t->mutex);
 	return t;
