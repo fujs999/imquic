@@ -550,6 +550,20 @@ void moq_loc_svc_abr_reconfigure(moq_loc_svc_abr *abr, int temporal_layers, int 
 	imquic_mutex_unlock(&abr->mutex);
 }
 
+void moq_loc_svc_abr_sync_path_baselines(moq_loc_svc_abr *abr, imquic_connection *conn) {
+	imquic_path_quality pq = { 0 };
+	if(abr == NULL || conn == NULL)
+		return;
+	if(imquic_get_connection_path_quality(conn, &pq) != 0)
+		return;
+	imquic_mutex_lock(&abr->mutex);
+	abr->prev_packets_sent = pq.packets_sent;
+	abr->prev_packets_lost = pq.packets_lost;
+	abr->prev_send_ok = 0;
+	abr->prev_send_fail = 0;
+	imquic_mutex_unlock(&abr->mutex);
+}
+
 void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
 		uint64_t send_ok, uint64_t send_fail, double media_loss_rate) {
 	imquic_path_quality pq = { 0 };
@@ -567,17 +581,26 @@ void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
 	delta_lost = pq.packets_lost - abr->prev_packets_lost;
 	delta_ok = send_ok - abr->prev_send_ok;
 	delta_fail = send_fail - abr->prev_send_fail;
-	abr->prev_packets_sent = pq.packets_sent;
-	abr->prev_packets_lost = pq.packets_lost;
-	abr->prev_send_ok = send_ok;
-	abr->prev_send_fail = send_fail;
+	{
+		gboolean tracks_send = (abr->prev_send_ok > 0 || abr->prev_send_fail > 0 ||
+				send_ok > 0 || send_fail > 0);
+		abr->prev_packets_sent = pq.packets_sent;
+		abr->prev_packets_lost = pq.packets_lost;
+		abr->prev_send_ok = send_ok;
+		abr->prev_send_fail = send_fail;
 
-	if(delta_sent > 0)
-		loss_rate = (double)delta_lost / (double)delta_sent;
-	else if((delta_ok + delta_fail) > 0)
-		loss_rate = (double)delta_fail / (double)(delta_ok + delta_fail);
+		/* Application send outcomes (publisher) take precedence when available */
+		if((delta_ok + delta_fail) > 0)
+			loss_rate = (double)delta_fail / (double)(delta_ok + delta_fail);
+		else if(tracks_send && delta_sent > 0)
+			loss_rate = (double)delta_lost / (double)delta_sent;
+		/* Receiver-only callers pass send_ok/send_fail as 0: ignore QUIC packet loss */
+	}
 	if(media_loss_rate >= 0.0)
 		loss_rate = (loss_rate > media_loss_rate) ? loss_rate : media_loss_rate;
+	/* Local/loopback links often report spurious loss at very low RTT */
+	if(loss_rate > 0.0 && pq.rtt_us < 10000 && pq.rtt_jitter_us < 10000)
+		loss_rate = 0.0;
 
 	stress = 0.40 * moq_loc_svc_abr_clamp01(loss_rate / MOQ_LOC_SVC_ABR_LOSS_TARGET);
 	stress += 0.25 * moq_loc_svc_abr_clamp01((double)pq.rtt_us / (double)MOQ_LOC_SVC_ABR_RTT_TARGET_US);

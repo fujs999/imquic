@@ -165,6 +165,9 @@ static double quic_jitter_display_ms = 0;
 static double playout_delay_display_ms = 0;
 
 static void imquic_demo_reset_video_decode_sync(void);
+static void imquic_demo_reset_video_object_stats(void);
+static void imquic_demo_video_fetch_completed(void);
+static void imquic_demo_process_video_buffer(void);
 static void imquic_demo_on_video_loss(void);
 static gboolean imquic_demo_should_decode_video(uint64_t group_id, uint64_t object_id, gboolean keyframe);
 static void imquic_demo_track_video_object(uint64_t group_id, uint64_t object_id,
@@ -386,6 +389,19 @@ static void imquic_demo_reset_video_decode_sync(void) {
 	video_decode_synced = FALSE;
 }
 
+static void imquic_demo_reset_video_object_stats(void) {
+	memset(&video_object_stats, 0, sizeof(video_object_stats));
+}
+
+static void imquic_demo_video_fetch_completed(void) {
+	video_fetch_completed = TRUE;
+	/* FETCH replays old object IDs while live may already be ahead; reset loss stats */
+	imquic_demo_reset_video_object_stats();
+	if(svc_abr != NULL && stats_conn != NULL)
+		moq_loc_svc_abr_sync_path_baselines(svc_abr, stats_conn);
+	imquic_demo_process_video_buffer();
+}
+
 static void imquic_demo_on_video_loss(void) {
 	imquic_demo_reset_video_decode_sync();
 	got_keyframe = FALSE;
@@ -504,8 +520,34 @@ static void imquic_demo_track_video_object(uint64_t group_id, uint64_t object_id
 		uint64_t timestamp, uint64_t timescale) {
 	int64_t now_us = g_get_monotonic_time();
 	uint64_t ts_scale = timescale > 0 ? timescale : (uint64_t)G_USEC_PER_SEC;
+	gboolean svc_stats = moq_loc_svc_is_svc_codec(codec);
 
 	imquic_mutex_lock(&stats_mutex);
+	if(svc_stats && video_object_stats.initialized &&
+			group_id == video_object_stats.last_group_id) {
+		if(object_id == video_object_stats.last_object_id) {
+			if(video_object_stats.last_arrival_us > 0 && ts_scale > 0 && timestamp > 0) {
+				double transit_ms = (double)(now_us - video_object_stats.last_arrival_us) / 1000.0;
+				int64_t ts_diff = (int64_t)(timestamp - video_object_stats.last_media_ts);
+				double media_ms = (double)ts_diff * 1000.0 / (double)ts_scale;
+				double d = transit_ms - media_ms;
+				if(d < 0.0)
+					d = -d;
+				video_object_stats.jitter_ms += (d - video_object_stats.jitter_ms) / 16.0;
+			}
+			if(ts_scale > 0 && timestamp > 0) {
+				video_object_stats.last_media_ts = timestamp;
+				video_object_stats.last_timescale = ts_scale;
+				video_object_stats.last_arrival_us = now_us;
+			}
+			imquic_mutex_unlock(&stats_mutex);
+			return;
+		}
+		if(timestamp > 0 && timestamp == video_object_stats.last_media_ts) {
+			imquic_mutex_unlock(&stats_mutex);
+			return;
+		}
+	}
 	if(!video_object_stats.initialized) {
 		video_object_stats.last_group_id = group_id;
 		video_object_stats.last_object_id = object_id;
@@ -518,15 +560,17 @@ static void imquic_demo_track_video_object(uint64_t group_id, uint64_t object_id
 	} else {
 		if(group_id == video_object_stats.last_group_id) {
 			if(object_id > video_object_stats.last_object_id) {
-				uint64_t gap = object_id - video_object_stats.last_object_id - 1;
-				if(gap > 0) {
-					video_object_stats.objects_lost_window += (uint32_t)gap;
-					imquic_demo_on_video_loss();
+				if(!svc_stats) {
+					uint64_t gap = object_id - video_object_stats.last_object_id - 1;
+					if(gap > 0) {
+						video_object_stats.objects_lost_window += (uint32_t)gap;
+						imquic_demo_on_video_loss();
+					}
 				}
 				video_object_stats.last_object_id = object_id;
 			}
 		} else if(group_id > video_object_stats.last_group_id) {
-			if(object_id != 0)
+			if(!svc_stats && object_id != 0)
 				imquic_demo_on_video_loss();
 			video_object_stats.last_group_id = group_id;
 			video_object_stats.last_object_id = object_id;
@@ -641,6 +685,8 @@ static void imquic_demo_svc_start_adaptive(void) {
 	else if(updated)
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC adaptive decode updated (%d temporal, %d spatial layers)\n",
 			svc_temporal_layers, svc_spatial_layers);
+	if(stats_conn != NULL)
+		moq_loc_svc_abr_sync_path_baselines(svc_abr, stats_conn);
 }
 
 static void imquic_demo_new_connection(imquic_connection *conn, void *user_data) {
@@ -751,6 +797,8 @@ static void imquic_demo_subscribe_accepted(imquic_connection *conn, uint64_t req
 				imquic_get_connection_name(conn), request_id, video_fetch_request_id, 0);
 			imquic_moq_joining_fetch(conn, video_fetch_request_id, request_id, FALSE, 0, &fparams);
 		}
+	} else if(video) {
+		video_fetch_completed = TRUE;
 	}
 	if(track_properties != NULL)
 		imquic_moq_properties_print(imquic_moq_get_version(conn), IMQUIC_LOG_VERB, track_properties);
@@ -807,9 +855,7 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 		if(object->end_of_stream && object->delivery == IMQUIC_MOQ_USE_FETCH && object->request_id == video_fetch_request_id) {
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] Video FETCH completed, fast-decoding %d buffered objects\n",
 				imquic_get_connection_name(conn), g_list_length(video_buffer));
-			/* FETCH completed, fast-decode video objects */
-			video_fetch_completed = TRUE;
-			imquic_demo_process_video_buffer();
+			imquic_demo_video_fetch_completed();
 		}
 		return;
 	}
@@ -1051,10 +1097,12 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 				return;
 			}
 			gboolean render = (object->delivery != IMQUIC_MOQ_USE_FETCH);
-			if(timescale > 0)
-				imquic_demo_track_video_object(object->group_id, object->object_id, timestamp, timescale);
-			else
-				imquic_demo_track_video_object(object->group_id, object->object_id, 0, G_USEC_PER_SEC);
+			if(object->delivery != IMQUIC_MOQ_USE_FETCH && video_fetch_completed) {
+				if(timescale > 0)
+					imquic_demo_track_video_object(object->group_id, object->object_id, timestamp, timescale);
+				else
+					imquic_demo_track_video_object(object->group_id, object->object_id, 0, G_USEC_PER_SEC);
+			}
 			if(!imquic_demo_should_decode_video(object->group_id, object->object_id, keyframe))
 				return;
 			imquic_demo_update_svc_display_from_object(object);
@@ -1069,9 +1117,7 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 		if(object->delivery == IMQUIC_MOQ_USE_FETCH && object->request_id == video_fetch_request_id) {
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] Video FETCH completed, fast-decoding %d buffered objects\n",
 				imquic_get_connection_name(conn), g_list_length(video_buffer));
-			/* FETCH completed, fast-decode video objects */
-			video_fetch_completed = TRUE;
-			imquic_demo_process_video_buffer();
+			imquic_demo_video_fetch_completed();
 		}
 	}
 }
@@ -1222,7 +1268,9 @@ static void imquic_demo_update_video_stats(uint32_t ticks) {
 		quic_jitter_display_ms = (double)pq.rtt_jitter_us / 1000.0;
 	}
 	if(svc_abr != NULL && stats_conn != NULL) {
-		double media_loss = object_loss_rate_display / 100.0;
+		double media_loss = -1.0;
+		if(video_fetch_completed && !moq_loc_svc_is_svc_codec(codec))
+			media_loss = object_loss_rate_display / 100.0;
 		moq_loc_svc_abr_update(svc_abr, stats_conn, 0, 0, media_loss);
 		svc_max_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
 		if(svc_max_spatial_cap < 0)
@@ -1625,6 +1673,12 @@ int main(int argc, char *argv[]) {
 				goto done;
 			}
 			g_strlcpy(video_codec_str, imquic_demo_video_codec_str(codec), sizeof(video_codec_str));
+			if(moq_loc_svc_is_svc_codec(codec)) {
+				if(svc_spatial_layers < 2)
+					svc_spatial_layers = 2;
+				if(svc_temporal_layers < 2)
+					svc_temporal_layers = 2;
+			}
 		}
 	}
 

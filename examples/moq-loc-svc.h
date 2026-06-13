@@ -83,6 +83,7 @@ void moq_loc_svc_abr_destroy(moq_loc_svc_abr *abr);
 void moq_loc_svc_abr_set_temporal_layers(moq_loc_svc_abr *abr, int temporal_layers);
 void moq_loc_svc_abr_set_spatial_layers(moq_loc_svc_abr *abr, int spatial_layers);
 void moq_loc_svc_abr_reconfigure(moq_loc_svc_abr *abr, int temporal_layers, int spatial_layers);
+void moq_loc_svc_abr_sync_path_baselines(moq_loc_svc_abr *abr, imquic_connection *conn);
 void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
 	uint64_t send_ok, uint64_t send_fail, double media_loss_rate);
 int moq_loc_svc_abr_get_temporal_layers(const moq_loc_svc_abr *abr);
