@@ -27,20 +27,22 @@ static GHashTable *connections = NULL;
 #ifdef HAVE_ROQ_DISPLAY
 static imquic_roq_rtp_state svc_feedback_rtp = { 0 };
 
-static void imquic_demo_send_svc_feedback(imquic_connection *conn, uint8_t max_temporal_layer, void *user_data) {
+static void imquic_demo_send_svc_feedback(imquic_connection *conn, uint8_t max_temporal_layer,
+		uint8_t max_spatial_layer, void *user_data) {
 	uint8_t packet[64];
 	size_t plen = 0;
 	if(conn == NULL)
 		return;
-	plen = imquic_roq_rtp_build_svc_feedback(&svc_feedback_rtp, packet, sizeof(packet), max_temporal_layer);
+	plen = imquic_roq_rtp_build_svc_feedback(&svc_feedback_rtp, packet, sizeof(packet),
+		max_temporal_layer, max_spatial_layer);
 	if(plen == 0)
 		return;
 	if(imquic_roq_send_rtp(conn, IMQUIC_ROQ_DATAGRAM, IMQUIC_ROQ_SVC_FEEDBACK_FLOW_ID, packet, plen, FALSE) == 0) {
 		IMQUIC_LOG(IMQUIC_LOG_WARN, "[%s] Couldn't send SVC layer feedback\n", imquic_get_connection_name(conn));
 		return;
 	}
-	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] SVC feedback: max temporal layer %u\n",
-		imquic_get_connection_name(conn), max_temporal_layer);
+	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] SVC feedback: max temporal layer %u, spatial layer %u\n",
+		imquic_get_connection_name(conn), max_temporal_layer, max_spatial_layer);
 }
 #endif
 

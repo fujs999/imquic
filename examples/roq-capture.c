@@ -62,6 +62,7 @@ static moq_loc_svc_abr *svc_abr = NULL;
 static moq_loc_svc_config svc_cfg = { 0 };
 static imquic_demo_video_codec video_codec_id = DEMO_H264_ANNEXB;
 static volatile int remote_max_temporal_layer = -1;
+static volatile int remote_max_spatial_layer = -1;
 static int applied_enc_generation = 0, applied_audio_bitrate = 0;
 static int enc_target_width = 0, enc_target_height = 0, enc_target_fps = 0;
 static enum AVPixelFormat enc_target_pix_fmt = AV_PIX_FMT_YUV420P;
@@ -351,6 +352,10 @@ void roq_capture_set_remote_max_temporal_layer(int max_layer) {
 	g_atomic_int_set(&remote_max_temporal_layer, max_layer);
 }
 
+void roq_capture_set_remote_max_spatial_layer(int max_layer) {
+	g_atomic_int_set(&remote_max_spatial_layer, max_layer);
+}
+
 static int roq_capture_effective_max_temporal_layer(void) {
 	int local_max = svc_cfg.max_send_temporal_layer;
 	int remote_max = g_atomic_int_get(&remote_max_temporal_layer);
@@ -361,12 +366,21 @@ static int roq_capture_effective_max_temporal_layer(void) {
 	return local_max;
 }
 
+static int roq_capture_effective_max_spatial_layer(void) {
+	int local_max = svc_cfg.max_send_spatial_layer;
+	int remote_max = g_atomic_int_get(&remote_max_spatial_layer);
+	if(svc_abr != NULL)
+		local_max = moq_loc_svc_abr_get_max_spatial_layer(svc_abr);
+	if(remote_max >= 0 && remote_max < local_max)
+		local_max = remote_max;
+	return local_max;
+}
+
 static void roq_capture_apply_svc_send_layer(void) {
 	if(!svc_cfg.enabled)
 		return;
 	svc_cfg.max_send_temporal_layer = roq_capture_effective_max_temporal_layer();
-	if(svc_abr != NULL)
-		svc_cfg.max_send_spatial_layer = moq_loc_svc_abr_get_max_spatial_layer(svc_abr);
+	svc_cfg.max_send_spatial_layer = roq_capture_effective_max_spatial_layer();
 }
 
 static int roq_capture_create_audio(void) {

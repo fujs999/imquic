@@ -103,11 +103,15 @@ gboolean imquic_roq_rtp_depay_vp9(imquic_roq_vp9_depay *depay,
 #define IMQUIC_ROQ_SVC_FEEDBACK_FLOW_ID 99
 #define IMQUIC_ROQ_SVC_FEEDBACK_PAYLOAD_TYPE 127
 
+#define IMQUIC_ROQ_SVC_FEEDBACK_VERSION_TEMPORAL 1
+#define IMQUIC_ROQ_SVC_FEEDBACK_VERSION_LAYERS 2
+
 size_t imquic_roq_rtp_build_svc_feedback(imquic_roq_rtp_state *state, uint8_t *buffer, size_t blen,
-	uint8_t max_temporal_layer);
+	uint8_t max_temporal_layer, uint8_t max_spatial_layer);
 
 gboolean imquic_roq_rtp_is_svc_feedback(uint64_t flow_id, uint8_t payload_type);
 
-gboolean imquic_roq_rtp_parse_svc_feedback(uint8_t *rtp, size_t rtp_len, uint8_t *max_temporal_layer);
+gboolean imquic_roq_rtp_parse_svc_feedback(uint8_t *rtp, size_t rtp_len, uint8_t *max_temporal_layer,
+	uint8_t *max_spatial_layer);
 
 #endif

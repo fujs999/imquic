@@ -181,13 +181,16 @@ static void imquic_demo_rtp_incoming(imquic_connection *conn, imquic_roq_multipl
 	}
 #ifdef HAVE_ROQ_CAPTURE
 	{
-		uint8_t remote_max_layer = 0;
+		uint8_t remote_max_temporal = 0, remote_max_spatial = 0xFF;
 		imquic_roq_rtp_header *rtp = (imquic_roq_rtp_header *)bytes;
 		if(imquic_roq_rtp_is_svc_feedback(flow_id, rtp->type) &&
-				imquic_roq_rtp_parse_svc_feedback(bytes, blen, &remote_max_layer)) {
-			roq_capture_set_remote_max_temporal_layer((int)remote_max_layer);
-			IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] Remote SVC max temporal layer: %u\n",
-				imquic_get_connection_name(conn), remote_max_layer);
+				imquic_roq_rtp_parse_svc_feedback(bytes, blen, &remote_max_temporal, &remote_max_spatial)) {
+			roq_capture_set_remote_max_temporal_layer((int)remote_max_temporal);
+			if(remote_max_spatial != 0xFF)
+				roq_capture_set_remote_max_spatial_layer((int)remote_max_spatial);
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] Remote SVC max layers: temporal=%u spatial=%u\n",
+				imquic_get_connection_name(conn), remote_max_temporal,
+				remote_max_spatial != 0xFF ? remote_max_spatial : 255);
 			return;
 		}
 	}

@@ -60,7 +60,8 @@ static moq_loc_svc_abr *svc_abr = NULL;
 static gboolean svc_adaptive_enabled = FALSE;
 static roq_display_svc_feedback_cb svc_feedback_cb = NULL;
 static void *svc_feedback_user_data = NULL;
-static int svc_feedback_last_layer = -1;
+static int svc_feedback_last_temporal = -1;
+static int svc_feedback_last_spatial = -1;
 
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
@@ -97,6 +98,10 @@ typedef struct roq_video_rtp_stats {
 	uint32_t last_rtp_ts;
 	int64_t last_arrival_us;
 	double jitter_ms;
+	gboolean stream_origin_initialized;
+	uint32_t stream_origin_rtp_ts;
+	int64_t stream_origin_arrival_us;
+	double stream_delay_ms;
 	uint32_t packets_received_window;
 	uint32_t packets_lost_window;
 } roq_video_rtp_stats;
@@ -112,6 +117,7 @@ static double rtp_jitter_display = 0;
 static double quic_rtt_display_ms = 0;
 static double quic_jitter_display_ms = 0;
 static double playout_delay_display_ms = 0;
+static double stream_delay_display_ms = 0;
 
 static const char *roq_display_font_paths[] = {
 	"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -122,6 +128,7 @@ static const char *roq_display_font_paths[] = {
 	NULL
 };
 
+static void roq_display_track_video_frame(uint32_t rtp_ts);
 static void roq_display_update_stats(uint32_t ticks);
 static void roq_display_update_svc_abr(void);
 static void roq_display_maybe_send_svc_feedback(void);
@@ -418,6 +425,26 @@ static void roq_display_set_stats_conn(imquic_connection *conn) {
 			imquic_connection_unref(stats_conn);
 		stats_conn = conn;
 		imquic_connection_ref(stats_conn);
+		if(svc_abr != NULL)
+			moq_loc_svc_abr_sync_path_baselines(svc_abr, stats_conn);
+	}
+	imquic_mutex_unlock(&stats_mutex);
+}
+
+static void roq_display_track_video_frame(uint32_t rtp_ts) {
+	int64_t now_us = g_get_monotonic_time();
+
+	imquic_mutex_lock(&stats_mutex);
+	if(!video_rtp_stats.stream_origin_initialized) {
+		video_rtp_stats.stream_origin_rtp_ts = rtp_ts;
+		video_rtp_stats.stream_origin_arrival_us = now_us;
+		video_rtp_stats.stream_origin_initialized = TRUE;
+	} else {
+		int32_t ts_diff = (int32_t)(rtp_ts - video_rtp_stats.stream_origin_rtp_ts);
+		int64_t media_elapsed_us = (int64_t)ts_diff * (int64_t)G_USEC_PER_SEC /
+			(int64_t)ROQ_DISPLAY_VIDEO_RTP_CLOCK;
+		int64_t expected_arrival_us = video_rtp_stats.stream_origin_arrival_us + media_elapsed_us;
+		video_rtp_stats.stream_delay_ms = (double)(now_us - expected_arrival_us) / 1000.0;
 	}
 	imquic_mutex_unlock(&stats_mutex);
 }
@@ -493,6 +520,7 @@ static void roq_display_update_stats(uint32_t ticks) {
 	else
 		rtp_loss_rate_display = 0.0;
 	rtp_jitter_display = video_rtp_stats.jitter_ms;
+	stream_delay_display_ms = video_rtp_stats.stream_delay_ms;
 	video_rtp_stats.packets_lost_window = 0;
 	video_rtp_stats.packets_received_window = 0;
 
@@ -635,6 +663,8 @@ static gboolean roq_display_svc_within_limits(const uint8_t *data, size_t len) {
 		return FALSE;
 	if(svc_max_spatial_layer >= 0 && layer.spatial_id > (uint8_t)svc_max_spatial_layer)
 		return FALSE;
+	if(!moq_loc_svc_layer_should_decode(&layer, svc_spatial_layers, svc_max_spatial_layer))
+		return FALSE;
 	return TRUE;
 }
 
@@ -659,7 +689,7 @@ static void roq_display_update_svc_abr(void) {
 			media_loss = (double)rtp_packets_lost_display /
 				(double)(rtp_packets_recv_display + rtp_packets_lost_display);
 		moq_loc_svc_abr_update(svc_abr, stats_conn, 0, 0, media_loss,
-			MOQ_LOC_SVC_ABR_METRIC_UNUSED, MOQ_LOC_SVC_ABR_METRIC_UNUSED);
+			rtp_jitter_display, stream_delay_display_ms);
 		svc_max_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
 		if(svc_max_spatial_cap < 0)
 			svc_max_spatial_layer = moq_loc_svc_abr_get_max_spatial_layer(svc_abr);
@@ -674,9 +704,11 @@ static void roq_display_update_svc_abr(void) {
 
 static void roq_display_maybe_send_svc_feedback(void) {
 	imquic_connection *conn = NULL;
+	int feedback_spatial = svc_max_spatial_layer >= 0 ? svc_max_spatial_layer : svc_spatial_layers - 1;
 	if(svc_feedback_cb == NULL || !svc_adaptive_enabled || svc_max_temporal_layer < 0)
 		return;
-	if(svc_max_temporal_layer == svc_feedback_last_layer)
+	if(svc_max_temporal_layer == svc_feedback_last_temporal &&
+			feedback_spatial == svc_feedback_last_spatial)
 		return;
 	imquic_mutex_lock(&stats_mutex);
 	if(stats_conn != NULL) {
@@ -686,8 +718,9 @@ static void roq_display_maybe_send_svc_feedback(void) {
 	imquic_mutex_unlock(&stats_mutex);
 	if(conn == NULL)
 		return;
-	svc_feedback_cb(conn, (uint8_t)svc_max_temporal_layer, svc_feedback_user_data);
-	svc_feedback_last_layer = svc_max_temporal_layer;
+	svc_feedback_cb(conn, (uint8_t)svc_max_temporal_layer, (uint8_t)feedback_spatial, svc_feedback_user_data);
+	svc_feedback_last_temporal = svc_max_temporal_layer;
+	svc_feedback_last_spatial = feedback_spatial;
 	imquic_connection_unref(conn);
 }
 
@@ -781,6 +814,7 @@ static void roq_display_feed_vp8(uint64_t flow_id, imquic_roq_rtp_header *header
 		imquic_roq_vp8_depay_reset(&vp8_depay);
 		return;
 	}
+	roq_display_track_video_frame(ntohl(header->timestamp));
 	keyframe = imquic_demo_vp8_is_keyframe(frame, frame_len);
 	roq_display_decode_access_unit(frame, frame_len, keyframe);
 	imquic_roq_vp8_depay_reset(&vp8_depay);
@@ -808,6 +842,7 @@ static void roq_display_feed_vp9(uint64_t flow_id, imquic_roq_rtp_header *header
 		imquic_roq_vp9_depay_reset(&vp9_depay);
 		return;
 	}
+	roq_display_track_video_frame(ntohl(header->timestamp));
 	keyframe = imquic_demo_vp9_is_keyframe(frame, frame_len) ||
 		imquic_demo_vp9_rtp_is_keyframe(payload, payload_len);
 	roq_display_decode_access_unit(frame, frame_len, keyframe);
@@ -847,6 +882,7 @@ static void roq_display_feed_video(uint64_t flow_id, imquic_roq_rtp_header *head
 		roq_display_reset_depay();
 		return;
 	}
+	roq_display_track_video_frame(ntohl(header->timestamp));
 	gboolean keyframe = roq_display_annexb_is_keyframe(depay.access_unit->data, depay.access_unit->len);
 	roq_display_decode_access_unit(depay.access_unit->data, depay.access_unit->len, keyframe);
 	roq_display_reset_depay();

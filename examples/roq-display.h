@@ -35,7 +35,8 @@ typedef struct roq_display_config {
 	gboolean debug_ffmpeg;
 } roq_display_config;
 
-typedef void (*roq_display_svc_feedback_cb)(imquic_connection *conn, uint8_t max_temporal_layer, void *user_data);
+typedef void (*roq_display_svc_feedback_cb)(imquic_connection *conn, uint8_t max_temporal_layer,
+	uint8_t max_spatial_layer, void *user_data);
 
 int roq_display_init(const roq_display_config *config);
 gboolean roq_display_svc_adaptive_enabled(void);
