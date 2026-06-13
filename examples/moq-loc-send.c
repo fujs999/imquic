@@ -667,7 +667,8 @@ static void *imquic_demo_video_capture_thread(void *user_data) {
 }
 
 static gboolean imquic_demo_moq_send_video_packet(AVPacket *packet, int64_t wait,
-		const moq_loc_svc_layer *layer_override, AVCodecContext *enc_ctx) {
+		const moq_loc_svc_layer *layer_override, AVCodecContext *enc_ctx,
+		gboolean advance_timestamp) {
 	gboolean kf = (packet->flags & AV_PKT_FLAG_KEY);
 	moq_loc_svc_layer layer = { 0 };
 	gboolean svc = moq_loc_svc_is_svc_codec(codec);
@@ -743,7 +744,10 @@ static gboolean imquic_demo_moq_send_video_packet(AVPacket *packet, int64_t wait
 	timestamp.id = IMQUIC_MOQ_LOC_TIMESTAMP;
 	timestamp.value.number = video_ts;
 	props = g_list_append(props, &timestamp);
-	video_ts += wait;
+	if(advance_timestamp) {
+		video_ts += wait;
+		video_object_id++;
+	}
 	imquic_moq_property videoconfig = { 0 };
 	imquic_moq_property frame_marking = { 0 };
 	uint8_t avcc_data[1500];
@@ -779,7 +783,6 @@ static gboolean imquic_demo_moq_send_video_packet(AVPacket *packet, int64_t wait
 		.delivery = IMQUIC_MOQ_USE_SUBGROUP,
 		.end_of_stream = FALSE
 	};
-	video_object_id++;
 	imquic_demo_send_object(&object, TRUE);
 	g_free(avcc_payload);
 	g_list_free(props);
@@ -787,7 +790,7 @@ static gboolean imquic_demo_moq_send_video_packet(AVPacket *packet, int64_t wait
 }
 
 static void imquic_demo_drain_video_encoder_ctx(AVCodecContext *ctx, int64_t wait,
-		const moq_loc_svc_layer *layer_override) {
+		const moq_loc_svc_layer *layer_override, gboolean advance_timestamp) {
 	AVPacket packet = { 0 };
 	if(ctx == NULL)
 		return;
@@ -800,30 +803,41 @@ static void imquic_demo_drain_video_encoder_ctx(AVCodecContext *ctx, int64_t wai
 				ret, av_err2str(ret));
 			break;
 		}
-		imquic_demo_moq_send_video_packet(&packet, wait, layer_override, ctx);
+		imquic_demo_moq_send_video_packet(&packet, wait, layer_override, ctx, advance_timestamp);
 		av_packet_unref(&packet);
 	}
 }
 
 static void imquic_demo_drain_video_encoder(int64_t wait) {
+	int max_layer = 0;
 	if(moq_loc_svc_use_multi_spatial_encode(&svc_cfg)) {
 		int s = 0;
-		for(s = 0; s < svc_cfg.spatial_layers; s++) {
+		max_layer = svc_cfg.max_send_spatial_layer;
+		if(max_layer < 0)
+			max_layer = svc_cfg.spatial_layers - 1;
+		if(max_layer >= svc_cfg.spatial_layers)
+			max_layer = svc_cfg.spatial_layers - 1;
+		for(s = 0; s <= max_layer; s++) {
 			moq_loc_svc_layer layer = { 0 };
 			layer.spatial_id = (uint8_t)s;
 			if(svc_spatial_enc[s] != NULL)
-				imquic_demo_drain_video_encoder_ctx(svc_spatial_enc[s], wait, &layer);
+				imquic_demo_drain_video_encoder_ctx(svc_spatial_enc[s], wait, &layer, FALSE);
 		}
 		return;
 	}
-	imquic_demo_drain_video_encoder_ctx(videoenc_ctx, wait, NULL);
+	imquic_demo_drain_video_encoder_ctx(videoenc_ctx, wait, NULL, TRUE);
 }
 
 static void imquic_demo_encode_spatial_layers(AVFrame *source, int64_t wait, gboolean force_kf) {
-	int s = 0, ret = 0;
+	int s = 0, ret = 0, max_layer = 0;
 	if(source == NULL || !moq_loc_svc_use_multi_spatial_encode(&svc_cfg))
 		return;
-	for(s = 0; s < svc_cfg.spatial_layers; s++) {
+	max_layer = svc_cfg.max_send_spatial_layer;
+	if(max_layer < 0)
+		max_layer = svc_cfg.spatial_layers - 1;
+	if(max_layer >= svc_cfg.spatial_layers)
+		max_layer = svc_cfg.spatial_layers - 1;
+	for(s = 0; s <= max_layer; s++) {
 		AVCodecContext *ctx = svc_spatial_enc[s];
 		moq_loc_svc_layer layer_override = { 0 };
 		AVFrame *scaled = NULL;
@@ -862,7 +876,7 @@ static void imquic_demo_encode_spatial_layers(AVFrame *source, int64_t wait, gbo
 			scaled->color_range = AVCOL_RANGE_MPEG;
 		ret = avcodec_send_frame(ctx, scaled);
 		if(ret == AVERROR(EAGAIN)) {
-			imquic_demo_drain_video_encoder_ctx(ctx, wait, &layer_override);
+			imquic_demo_drain_video_encoder_ctx(ctx, wait, &layer_override, FALSE);
 			ret = avcodec_send_frame(ctx, scaled);
 		}
 		av_frame_free(&scaled);
@@ -871,8 +885,10 @@ static void imquic_demo_encode_spatial_layers(AVFrame *source, int64_t wait, gbo
 				s, ret, av_err2str(ret));
 			continue;
 		}
-		imquic_demo_drain_video_encoder_ctx(ctx, wait, &layer_override);
+		imquic_demo_drain_video_encoder_ctx(ctx, wait, &layer_override, FALSE);
 	}
+	video_ts += wait;
+	video_object_id++;
 }
 
 static void *imquic_demo_video_enc_thread(void *user_data) {

@@ -274,6 +274,42 @@ gboolean moq_loc_svc_layer_within_send_limits(const moq_loc_svc_config *cfg,
 	return TRUE;
 }
 
+int moq_loc_svc_target_decode_spatial_layer(int spatial_layers, int max_spatial_layer) {
+	if(spatial_layers < 1)
+		spatial_layers = 1;
+	if(spatial_layers > MOQ_LOC_SVC_MAX_SPATIAL_LAYERS)
+		spatial_layers = MOQ_LOC_SVC_MAX_SPATIAL_LAYERS;
+	if(max_spatial_layer < 0)
+		return spatial_layers - 1;
+	if(max_spatial_layer >= spatial_layers)
+		return spatial_layers - 1;
+	return max_spatial_layer;
+}
+
+gboolean moq_loc_svc_layer_should_decode(const moq_loc_svc_layer *layer,
+		int spatial_layers, int max_spatial_layer) {
+	int target = 0;
+	if(layer == NULL)
+		return TRUE;
+	if(spatial_layers <= 1)
+		return TRUE;
+	target = moq_loc_svc_target_decode_spatial_layer(spatial_layers, max_spatial_layer);
+	return layer->spatial_id == (uint8_t)target;
+}
+
+gboolean moq_loc_svc_object_should_decode(imquic_moq_object *object,
+		int spatial_layers, int max_spatial_layer) {
+	moq_loc_svc_layer layer = { 0 };
+	if(object == NULL)
+		return FALSE;
+	if(spatial_layers <= 1)
+		return TRUE;
+	if(moq_loc_svc_layer_from_properties(object->properties, &layer))
+		return moq_loc_svc_layer_should_decode(&layer, spatial_layers, max_spatial_layer);
+	moq_loc_svc_unpack_subgroup(object->subgroup_id, &layer.spatial_id, &layer.temporal_id);
+	return moq_loc_svc_layer_should_decode(&layer, spatial_layers, max_spatial_layer);
+}
+
 uint64_t moq_loc_svc_subgroup_id(uint8_t spatial_id, uint8_t temporal_id) {
 	return ((uint64_t)spatial_id << 8) | temporal_id;
 }

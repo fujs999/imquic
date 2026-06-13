@@ -132,9 +132,15 @@ static void roq_capture_drain_video_encoder_ctx(AVCodecContext *ctx, int target_
 }
 
 static void roq_capture_drain_video_encoder(int target_fps) {
+	int max_layer = 0;
 	if(moq_loc_svc_use_multi_spatial_encode(&svc_cfg)) {
 		int s = 0;
-		for(s = 0; s < svc_cfg.spatial_layers; s++) {
+		max_layer = svc_cfg.max_send_spatial_layer;
+		if(max_layer < 0)
+			max_layer = svc_cfg.spatial_layers - 1;
+		if(max_layer >= svc_cfg.spatial_layers)
+			max_layer = svc_cfg.spatial_layers - 1;
+		for(s = 0; s <= max_layer; s++) {
 			moq_loc_svc_layer layer = { 0 };
 			layer.spatial_id = (uint8_t)s;
 			if(svc_spatial_enc[s] != NULL)
@@ -146,10 +152,15 @@ static void roq_capture_drain_video_encoder(int target_fps) {
 }
 
 static void roq_capture_encode_spatial_layers(AVFrame *source, int target_fps, gboolean force_kf) {
-	int s = 0, ret = 0;
+	int s = 0, ret = 0, max_layer = 0;
 	if(source == NULL || !moq_loc_svc_use_multi_spatial_encode(&svc_cfg))
 		return;
-	for(s = 0; s < svc_cfg.spatial_layers; s++) {
+	max_layer = svc_cfg.max_send_spatial_layer;
+	if(max_layer < 0)
+		max_layer = svc_cfg.spatial_layers - 1;
+	if(max_layer >= svc_cfg.spatial_layers)
+		max_layer = svc_cfg.spatial_layers - 1;
+	for(s = 0; s <= max_layer; s++) {
 		AVCodecContext *ctx = svc_spatial_enc[s];
 		moq_loc_svc_layer layer_override = { 0 };
 		AVFrame *scaled = NULL;

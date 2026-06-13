@@ -474,7 +474,11 @@ static void imquic_demo_process_video_buffer(void) {
 			temp = temp->next;
 			continue;
 		}
-		gboolean render = (temp->next == NULL);
+		if(!moq_loc_svc_object_should_decode(object, svc_spatial_layers, svc_max_spatial_layer)) {
+			temp = temp->next;
+			continue;
+		}
+		gboolean render = TRUE;
 		imquic_demo_track_video_object(object->group_id, object->object_id, 0, G_USEC_PER_SEC);
 		if(!imquic_demo_should_decode_video(object->group_id, object->object_id, keyframe)) {
 			temp = temp->next;
@@ -979,6 +983,11 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 				IMQUIC_LOG(IMQUIC_LOG_VERB, "[%s] Skipping SVC object on subgroup %"SCNu64" (max T=%d S=%d)\n",
 					imquic_get_connection_name(conn), object->subgroup_id,
 					svc_max_temporal_layer, svc_max_spatial_layer);
+				return;
+			}
+			if(!moq_loc_svc_object_should_decode(object, svc_spatial_layers, svc_max_spatial_layer)) {
+				IMQUIC_LOG(IMQUIC_LOG_VERB, "[%s] Skipping non-display spatial layer on subgroup %"SCNu64"\n",
+					imquic_get_connection_name(conn), object->subgroup_id);
 				return;
 			}
 			/* Check if we're still caching stuff due to the FETCH catch-up */

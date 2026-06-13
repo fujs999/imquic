@@ -47,6 +47,12 @@ int moq_loc_svc_spatial_layer_bitrate(int total_bitrate, int full_width, int ful
 gboolean moq_loc_svc_layer_within_send_limits(const moq_loc_svc_config *cfg,
 	const moq_loc_svc_layer *layer);
 
+int moq_loc_svc_target_decode_spatial_layer(int spatial_layers, int max_spatial_layer);
+gboolean moq_loc_svc_layer_should_decode(const moq_loc_svc_layer *layer,
+	int spatial_layers, int max_spatial_layer);
+gboolean moq_loc_svc_object_should_decode(imquic_moq_object *object,
+	int spatial_layers, int max_spatial_layer);
+
 uint64_t moq_loc_svc_subgroup_id(uint8_t spatial_id, uint8_t temporal_id);
 void moq_loc_svc_unpack_subgroup(uint64_t subgroup_id, uint8_t *spatial_id, uint8_t *temporal_id);
 
