@@ -110,6 +110,7 @@ static imquic_mutex mutex = IMQUIC_MUTEX_INITIALIZER;
 /* Video info overlay */
 #define IMQUIC_DEMO_FONT_SIZE 15
 #define IMQUIC_DEMO_OVERLAY_MAX_LINES 12
+#define IMQUIC_DEMO_OVERLAY_BG_ALPHA 128
 #define IMQUIC_DEMO_AUDIO_RATE 48000
 static TTF_Font *overlay_font = NULL;
 static gboolean overlay_font_inited = FALSE;
@@ -1173,7 +1174,7 @@ static void imquic_demo_format_bitrate(char *buf, size_t buflen, double bps) {
 static const char *imquic_demo_overlay_templates[] = {
 	"Resolution: 9999x9999",
 	"Codec: unknown codec",
-	"SVC layer: T9 (max=99, adaptive)",
+	"SVC: S99 T99 | pub 99S/99T | ABR max S=99 T=99 (adaptive)",
 	"FPS:   99.9",
 	"Bitrate:  99999.9 Kbps",
 	"Object loss:  99999 (100.0%)",
@@ -1412,12 +1413,14 @@ static void imquic_demo_render_video_overlay(SDL_Renderer *r) {
 	g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "Playout delay: %4.0f ms", playout);
 	lines[line_count] = line_bufs[line_count];
 	line_count++;
-	SDL_SetRenderDrawColor(r, 32, 32, 32, 255);
+	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(r, 32, 32, 32, IMQUIC_DEMO_OVERLAY_BG_ALPHA);
 	bg.x = x - 8;
 	bg.y = y - 6;
 	bg.w = overlay_bg_w;
 	bg.h = overlay_fixed_lines * overlay_line_h + 12;
 	SDL_RenderFillRect(r, &bg);
+	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 	for(i = 0; i < line_count; i++) {
 		imquic_demo_draw_overlay_line(r, x, y, lines[i]);
 		y += overlay_line_h;
