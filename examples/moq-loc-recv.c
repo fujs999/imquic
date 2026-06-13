@@ -852,19 +852,15 @@ static void imquic_demo_incoming_object(imquic_connection *conn, imquic_moq_obje
 					video_catalog_height = track->height;
 					video_catalog_framerate = track->framerate;
 					video_catalog_bitrate = track->bitrate;
-					if(track->temporal_id > 0)
-						svc_publisher_max_temporal = track->temporal_id;
-					if(track->spatial_id > 0)
-						svc_publisher_max_spatial = track->spatial_id;
 					if(moq_loc_svc_is_svc_codec(codec)) {
-						svc_temporal_layers = svc_publisher_max_temporal >= 0 ?
-							svc_publisher_max_temporal + 1 : 2;
-						svc_spatial_layers = svc_publisher_max_spatial >= 0 ?
-							svc_publisher_max_spatial + 1 : 1;
+						svc_publisher_max_temporal = track->temporal_id;
+						svc_publisher_max_spatial = track->spatial_id;
+						svc_temporal_layers = svc_publisher_max_temporal + 1;
+						svc_spatial_layers = svc_publisher_max_spatial + 1;
 						imquic_demo_svc_start_adaptive();
 						IMQUIC_LOG(IMQUIC_LOG_INFO,
-							"  -- SVC track detected (publisher max temporal=%d, spatial=%d)\n",
-							svc_publisher_max_temporal, svc_publisher_max_spatial);
+							"  -- SVC track detected (publisher %d spatial, %d temporal layer(s))\n",
+							svc_spatial_layers, svc_temporal_layers);
 					}
 				} else {
 					IMQUIC_LOG(IMQUIC_LOG_WARN, "  -- Unsupported '%s' track\n", track->role);
@@ -1266,8 +1262,9 @@ static void imquic_demo_render_video_overlay(SDL_Renderer *r) {
 	if(moq_loc_svc_is_svc_codec(codec)) {
 		const char *mode = svc_adaptive_enabled ? "adaptive" : "fixed";
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]),
-			"SVC layer: S%d T%d (max S=%d T=%d, %s)",
+			"SVC: S%d T%d | pub %dS/%dT | ABR max S=%d T=%d (%s)",
 			svc_current_spatial_layer, svc_current_temporal_layer,
+			svc_spatial_layers, svc_temporal_layers,
 			svc_max_spatial_layer, svc_max_temporal_layer, mode);
 	} else {
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]), "SVC layer:    n/a");
