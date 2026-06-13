@@ -658,7 +658,8 @@ static void roq_display_update_svc_abr(void) {
 		if(rtp_packets_recv_display + rtp_packets_lost_display > 0)
 			media_loss = (double)rtp_packets_lost_display /
 				(double)(rtp_packets_recv_display + rtp_packets_lost_display);
-		moq_loc_svc_abr_update(svc_abr, stats_conn, 0, 0, media_loss);
+		moq_loc_svc_abr_update(svc_abr, stats_conn, 0, 0, media_loss,
+			MOQ_LOC_SVC_ABR_METRIC_UNUSED, MOQ_LOC_SVC_ABR_METRIC_UNUSED);
 		svc_max_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
 		if(svc_max_spatial_cap < 0)
 			svc_max_spatial_layer = moq_loc_svc_abr_get_max_spatial_layer(svc_abr);

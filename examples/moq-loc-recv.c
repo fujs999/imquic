@@ -1271,7 +1271,8 @@ static void imquic_demo_update_video_stats(uint32_t ticks) {
 		double media_loss = -1.0;
 		if(video_fetch_completed && !moq_loc_svc_is_svc_codec(codec))
 			media_loss = object_loss_rate_display / 100.0;
-		moq_loc_svc_abr_update(svc_abr, stats_conn, 0, 0, media_loss);
+		moq_loc_svc_abr_update(svc_abr, stats_conn, 0, 0, media_loss,
+			media_jitter_display_ms, stream_delay_display_ms);
 		svc_max_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
 		if(svc_max_spatial_cap < 0)
 			svc_max_spatial_layer = moq_loc_svc_abr_get_max_spatial_layer(svc_abr);

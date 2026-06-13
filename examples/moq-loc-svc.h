@@ -18,6 +18,10 @@
 
 #define MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS 4
 #define MOQ_LOC_SVC_MAX_SPATIAL_LAYERS   3
+#define MOQ_LOC_SVC_ABR_MEDIA_JITTER_TARGET_MS 50.0
+#define MOQ_LOC_SVC_ABR_STREAM_DELAY_TARGET_MS 200.0
+#define MOQ_LOC_SVC_ABR_METRIC_UNUSED (-1.0)
+
 
 typedef struct moq_loc_svc_layer {
 	uint8_t temporal_id;
@@ -85,7 +89,8 @@ void moq_loc_svc_abr_set_spatial_layers(moq_loc_svc_abr *abr, int spatial_layers
 void moq_loc_svc_abr_reconfigure(moq_loc_svc_abr *abr, int temporal_layers, int spatial_layers);
 void moq_loc_svc_abr_sync_path_baselines(moq_loc_svc_abr *abr, imquic_connection *conn);
 void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
-	uint64_t send_ok, uint64_t send_fail, double media_loss_rate);
+	uint64_t send_ok, uint64_t send_fail, double media_loss_rate,
+	double media_jitter_ms, double stream_delay_ms);
 int moq_loc_svc_abr_get_temporal_layers(const moq_loc_svc_abr *abr);
 int moq_loc_svc_abr_get_spatial_layers(const moq_loc_svc_abr *abr);
 int moq_loc_svc_abr_get_max_temporal_layer(const moq_loc_svc_abr *abr);

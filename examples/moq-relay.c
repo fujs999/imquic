@@ -207,7 +207,8 @@ static void *imquic_demo_svc_abr_thread(void *user_data) {
 				imquic_demo_moq_subscription *s = sub_value;
 				if(s == NULL || s->svc_abr == NULL || s->sub == NULL || s->sub->conn == NULL)
 					continue;
-				moq_loc_svc_abr_update(s->svc_abr, s->sub->conn, 0, 0, -1.0);
+				moq_loc_svc_abr_update(s->svc_abr, s->sub->conn, 0, 0, -1.0,
+					MOQ_LOC_SVC_ABR_METRIC_UNUSED, MOQ_LOC_SVC_ABR_METRIC_UNUSED);
 			}
 		}
 		imquic_mutex_unlock(&mutex);

@@ -18,6 +18,9 @@
 #define MOQ_LOC_SVC_ABR_RTT_TARGET_US     150000
 #define MOQ_LOC_SVC_ABR_JITTER_TARGET_US  50000
 #define MOQ_LOC_SVC_ABR_LOSS_TARGET       0.50
+#define MOQ_LOC_SVC_ABR_MEDIA_JITTER_TARGET_MS 50.0
+#define MOQ_LOC_SVC_ABR_STREAM_DELAY_TARGET_MS 200.0
+#define MOQ_LOC_SVC_ABR_METRIC_UNUSED (-1.0)
 
 struct moq_loc_svc_abr {
 	int temporal_layers;
@@ -30,6 +33,7 @@ struct moq_loc_svc_abr {
 	double loss_rate;
 	uint64_t prev_packets_sent;
 	uint64_t prev_packets_lost;
+	uint64_t prev_packets_spurious;
 	uint64_t prev_send_ok;
 	uint64_t prev_send_fail;
 	imquic_mutex mutex;
@@ -559,17 +563,33 @@ void moq_loc_svc_abr_sync_path_baselines(moq_loc_svc_abr *abr, imquic_connection
 	imquic_mutex_lock(&abr->mutex);
 	abr->prev_packets_sent = pq.packets_sent;
 	abr->prev_packets_lost = pq.packets_lost;
+	abr->prev_packets_spurious = pq.packets_spurious;
 	abr->prev_send_ok = 0;
 	abr->prev_send_fail = 0;
 	imquic_mutex_unlock(&abr->mutex);
 }
 
+static double moq_loc_svc_abr_path_loss_rate(uint64_t delta_sent, uint64_t delta_lost,
+		uint64_t delta_spurious) {
+	uint64_t effective_lost = 0, denominator = 0;
+
+	if(delta_lost > delta_spurious)
+		effective_lost = delta_lost - delta_spurious;
+	denominator = delta_sent + effective_lost;
+	if(denominator == 0)
+		return 0.0;
+	return (double)effective_lost / (double)denominator;
+}
+
 void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
-		uint64_t send_ok, uint64_t send_fail, double media_loss_rate) {
+		uint64_t send_ok, uint64_t send_fail, double media_loss_rate,
+		double media_jitter_ms, double stream_delay_ms) {
 	imquic_path_quality pq = { 0 };
-	double loss_rate = 0.0, stress = 0.0;
-	uint64_t delta_sent = 0, delta_lost = 0, delta_ok = 0, delta_fail = 0;
+	double loss_rate = 0.0, path_loss_rate = 0.0, stress = 0.0;
+	uint64_t delta_sent = 0, delta_lost = 0, delta_spurious = 0;
+	uint64_t delta_ok = 0, delta_fail = 0;
 	int prev_temporal = 0, prev_spatial = 0;
+	gboolean is_publisher = FALSE;
 
 	if(abr == NULL)
 		return;
@@ -579,34 +599,44 @@ void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
 	imquic_mutex_lock(&abr->mutex);
 	delta_sent = pq.packets_sent - abr->prev_packets_sent;
 	delta_lost = pq.packets_lost - abr->prev_packets_lost;
+	delta_spurious = pq.packets_spurious - abr->prev_packets_spurious;
 	delta_ok = send_ok - abr->prev_send_ok;
 	delta_fail = send_fail - abr->prev_send_fail;
-	{
-		gboolean tracks_send = (abr->prev_send_ok > 0 || abr->prev_send_fail > 0 ||
-				send_ok > 0 || send_fail > 0);
-		abr->prev_packets_sent = pq.packets_sent;
-		abr->prev_packets_lost = pq.packets_lost;
-		abr->prev_send_ok = send_ok;
-		abr->prev_send_fail = send_fail;
+	is_publisher = (abr->prev_send_ok > 0 || abr->prev_send_fail > 0 ||
+			send_ok > 0 || send_fail > 0);
+	abr->prev_packets_sent = pq.packets_sent;
+	abr->prev_packets_lost = pq.packets_lost;
+	abr->prev_packets_spurious = pq.packets_spurious;
+	abr->prev_send_ok = send_ok;
+	abr->prev_send_fail = send_fail;
 
-		/* Application send outcomes (publisher) take precedence when available */
-		if((delta_ok + delta_fail) > 0)
-			loss_rate = (double)delta_fail / (double)(delta_ok + delta_fail);
-		else if(tracks_send && delta_sent > 0)
-			loss_rate = (double)delta_lost / (double)delta_sent;
-		/* Receiver-only callers pass send_ok/send_fail as 0: ignore QUIC packet loss */
-	}
+	/* Publisher: prefer application send outcomes, else QUIC path loss */
+	if((delta_ok + delta_fail) > 0)
+		loss_rate = (double)delta_fail / (double)(delta_ok + delta_fail);
+	else if(is_publisher)
+		path_loss_rate = moq_loc_svc_abr_path_loss_rate(delta_sent, delta_lost, delta_spurious);
+	/*
+	 * Receiver-only callers pass send_ok/send_fail as 0. picoquic path quality
+	 * "lost" counts outbound packets declared lost on this connection, not
+	 * inbound media loss. With few outbound app packets per window, delayed
+	 * loss detection inflates delta_lost/delta_sent (see picoquic nb_losses_found).
+	 */
 	if(media_loss_rate >= 0.0)
 		loss_rate = (loss_rate > media_loss_rate) ? loss_rate : media_loss_rate;
-	/* Local/loopback links often report spurious loss at very low RTT */
-	if(loss_rate > 0.0 && pq.rtt_us < 10000 && pq.rtt_jitter_us < 10000)
-		loss_rate = 0.0;
+	if(path_loss_rate > loss_rate)
+		loss_rate = path_loss_rate;
 
 	stress = 0.40 * moq_loc_svc_abr_clamp01(loss_rate / MOQ_LOC_SVC_ABR_LOSS_TARGET);
 	stress += 0.25 * moq_loc_svc_abr_clamp01((double)pq.rtt_us / (double)MOQ_LOC_SVC_ABR_RTT_TARGET_US);
 	stress += 0.20 * moq_loc_svc_abr_clamp01((double)pq.rtt_jitter_us / (double)MOQ_LOC_SVC_ABR_JITTER_TARGET_US);
 	if(pq.cwin > 0)
 		stress += 0.15 * moq_loc_svc_abr_clamp01((double)pq.bytes_in_transit / (double)pq.cwin);
+	if(!is_publisher) {
+		if(media_jitter_ms >= 0.0)
+			stress += 0.20 * moq_loc_svc_abr_clamp01(media_jitter_ms / MOQ_LOC_SVC_ABR_MEDIA_JITTER_TARGET_MS);
+		if(stream_delay_ms >= 0.0)
+			stress += 0.25 * moq_loc_svc_abr_clamp01(stream_delay_ms / MOQ_LOC_SVC_ABR_STREAM_DELAY_TARGET_MS);
+	}
 	if(stress > 1.0)
 		stress = 1.0;
 
@@ -631,9 +661,12 @@ void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
 		}
 		if(prev_temporal != abr->max_temporal_layer) {
 			IMQUIC_LOG(IMQUIC_LOG_INFO,
-				"SVC ABR max temporal layer %d -> %d (stress=%.2f, loss=%.1f%%, RTT=%"SCNu64"ms, jitter=%"SCNu64"ms)\n",
+				"SVC ABR max temporal layer %d -> %d (stress=%.2f, loss=%.1f%%, path=%.1f%%, "
+				"delta_sent=%"SCNu64", delta_lost=%"SCNu64", delta_spurious=%"SCNu64", "
+				"publisher=%d, RTT=%"SCNu64"ms, jitter=%"SCNu64"ms)\n",
 				prev_temporal, abr->max_temporal_layer, stress, loss_rate * 100.0,
-				pq.rtt_us / 1000, pq.rtt_jitter_us / 1000);
+				path_loss_rate * 100.0, delta_sent, delta_lost, delta_spurious,
+				is_publisher, pq.rtt_us / 1000, pq.rtt_jitter_us / 1000);
 		}
 	}
 
@@ -655,9 +688,12 @@ void moq_loc_svc_abr_update(moq_loc_svc_abr *abr, imquic_connection *conn,
 		}
 		if(prev_spatial != abr->max_spatial_layer) {
 			IMQUIC_LOG(IMQUIC_LOG_INFO,
-				"SVC ABR max spatial layer %d -> %d (stress=%.2f, loss=%.1f%%, RTT=%"SCNu64"ms, jitter=%"SCNu64"ms)\n",
+				"SVC ABR max spatial layer %d -> %d (stress=%.2f, loss=%.1f%%, path=%.1f%%, "
+				"delta_sent=%"SCNu64", delta_lost=%"SCNu64", delta_spurious=%"SCNu64", "
+				"publisher=%d, RTT=%"SCNu64"ms, jitter=%"SCNu64"ms)\n",
 				prev_spatial, abr->max_spatial_layer, stress, loss_rate * 100.0,
-				pq.rtt_us / 1000, pq.rtt_jitter_us / 1000);
+				path_loss_rate * 100.0, delta_sent, delta_lost, delta_spurious,
+				is_publisher, pq.rtt_us / 1000, pq.rtt_jitter_us / 1000);
 		}
 	}
 

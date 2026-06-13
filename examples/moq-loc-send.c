@@ -991,7 +991,8 @@ static void *imquic_demo_abr_thread(void *user_data) {
 			bytes = video_bytes_sent;
 			imquic_mutex_unlock(&send_mutex);
 			if(svc_abr != NULL && moq_loc_svc_is_svc_codec(codec) && svc_cfg.enabled) {
-				moq_loc_svc_abr_update(svc_abr, moq_conn, ok, fail, -1.0);
+				moq_loc_svc_abr_update(svc_abr, moq_conn, ok, fail, -1.0,
+					MOQ_LOC_SVC_ABR_METRIC_UNUSED, MOQ_LOC_SVC_ABR_METRIC_UNUSED);
 				svc_cfg.max_send_temporal_layer = moq_loc_svc_abr_get_max_temporal_layer(svc_abr);
 				svc_cfg.max_send_spatial_layer = moq_loc_svc_abr_get_max_spatial_layer(svc_abr);
 			}

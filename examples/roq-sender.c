@@ -139,7 +139,8 @@ static void *imquic_demo_abr_thread(void *user_data) {
 				if(abr != NULL)
 					moq_loc_abr_update(abr, conn, ok, fail, bytes);
 				if(svc_abr != NULL)
-					moq_loc_svc_abr_update(svc_abr, conn, ok, fail, -1.0);
+					moq_loc_svc_abr_update(svc_abr, conn, ok, fail, -1.0,
+						MOQ_LOC_SVC_ABR_METRIC_UNUSED, MOQ_LOC_SVC_ABR_METRIC_UNUSED);
 			}
 		}
 		g_usleep(500000);
