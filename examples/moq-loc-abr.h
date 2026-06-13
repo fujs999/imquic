@@ -17,10 +17,11 @@
 #define MOQ_LOC_ABR_SUBSTEPS  3
 #define MOQ_LOC_ABR_TOTAL_STEPS (MOQ_LOC_ABR_LEVELS * MOQ_LOC_ABR_SUBSTEPS)
 
-/* Target network limits (microseconds for RTT/jitter) */
-#define MOQ_LOC_ABR_RTT_TARGET_US     150000
-#define MOQ_LOC_ABR_JITTER_TARGET_US  50000
-#define MOQ_LOC_ABR_LOSS_TARGET       0.50
+/* Path stress normalization (microseconds for RTT/jitter); field/industrial links.
+ * Keep in sync with moq-loc-svc.h */
+#define MOQ_LOC_ABR_RTT_TARGET_US     1000000 /* 1 s RTT (satellite/radio field link) */
+#define MOQ_LOC_ABR_JITTER_TARGET_US  250000  /* 250 ms path RTT jitter */
+#define MOQ_LOC_ABR_LOSS_TARGET       0.50    /* 50% effective packet loss */
 
 /* ABR switching hysteresis (500ms update interval) */
 #define MOQ_LOC_ABR_IMPROVE_HOLDOFF        6

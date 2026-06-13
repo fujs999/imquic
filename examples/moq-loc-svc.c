@@ -15,13 +15,6 @@
 
 #include "moq-loc-svc.h"
 
-#define MOQ_LOC_SVC_ABR_RTT_TARGET_US     150000
-#define MOQ_LOC_SVC_ABR_JITTER_TARGET_US  50000
-#define MOQ_LOC_SVC_ABR_LOSS_TARGET       0.50
-#define MOQ_LOC_SVC_ABR_MEDIA_JITTER_TARGET_MS 50.0
-#define MOQ_LOC_SVC_ABR_STREAM_DELAY_TARGET_MS 200.0
-#define MOQ_LOC_SVC_ABR_METRIC_UNUSED (-1.0)
-
 struct moq_loc_svc_abr {
 	int temporal_layers;
 	int spatial_layers;

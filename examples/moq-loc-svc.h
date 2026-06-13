@@ -18,8 +18,15 @@
 
 #define MOQ_LOC_SVC_MAX_TEMPORAL_LAYERS 4
 #define MOQ_LOC_SVC_MAX_SPATIAL_LAYERS   3
-#define MOQ_LOC_SVC_ABR_MEDIA_JITTER_TARGET_MS 50.0
-#define MOQ_LOC_SVC_ABR_STREAM_DELAY_TARGET_MS 200.0
+
+/* SVC ABR stress normalization: metric / target is clamped to [0,1] per term.
+ * Tuned for field/industrial links (power, oil, emergency command): high baseline
+ * loss, RTT, and jitter should not constantly cap layers. Keep moq-loc-abr.h in sync. */
+#define MOQ_LOC_SVC_ABR_RTT_TARGET_US          1000000 /* 1 s RTT (satellite/radio field link) */
+#define MOQ_LOC_SVC_ABR_JITTER_TARGET_US       250000  /* 250 ms path RTT jitter */
+#define MOQ_LOC_SVC_ABR_LOSS_TARGET            0.50    /* 50% effective packet loss */
+#define MOQ_LOC_SVC_ABR_MEDIA_JITTER_TARGET_MS 250.0   /* inter-object arrival jitter */
+#define MOQ_LOC_SVC_ABR_STREAM_DELAY_TARGET_MS 2000.0  /* playout lag vs media timeline */
 #define MOQ_LOC_SVC_ABR_METRIC_UNUSED (-1.0)
 
 
