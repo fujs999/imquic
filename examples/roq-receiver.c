@@ -24,6 +24,9 @@
 /* Handled connections */
 static GHashTable *connections = NULL;
 
+/* Command line options */
+static demo_options options = { 0 };
+
 #ifdef HAVE_ROQ_DISPLAY
 static imquic_roq_rtp_state svc_feedback_rtp = { 0 };
 
@@ -41,13 +44,14 @@ static void imquic_demo_send_svc_feedback(imquic_connection *conn, uint8_t max_t
 		IMQUIC_LOG(IMQUIC_LOG_WARN, "[%s] Couldn't send SVC layer feedback\n", imquic_get_connection_name(conn));
 		return;
 	}
-	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] SVC feedback: max temporal layer %u, spatial layer %u\n",
-		imquic_get_connection_name(conn), max_temporal_layer, max_spatial_layer);
+	IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] SVC feedback: temporal max index %u (of %d layer(s)), "
+		"spatial max index %u (of %d layer(s))\n",
+		imquic_get_connection_name(conn), max_temporal_layer,
+		options.svc_temporal_layers > 0 ? options.svc_temporal_layers : 2,
+		max_spatial_layer,
+		options.svc_spatial_layers > 0 ? options.svc_spatial_layers : 1);
 }
 #endif
-
-/* Command line options */
-static demo_options options = { 0 };
 
 /* Signal */
 static volatile int stop = 0;
@@ -134,7 +138,7 @@ static void imquic_demo_rtp_incoming(imquic_connection *conn, imquic_roq_multipl
 	if(imquic_roq_rtp_is_svc_feedback(flow_id, rtp->type))
 		return;
 #endif
-	if(!options.quiet) {
+	if(!options.quiet && !options.display) {
 		IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s]  -- [%s][flow=%"SCNu64"][%zu] ssrc=%"SCNu32", pt=%d, seq=%"SCNu16", ts=%"SCNu32"\n",
 			imquic_get_connection_name(conn), imquic_roq_multiplexing_str(multiplexing), flow_id, blen,
 			ntohl(rtp->ssrc), rtp->type, ntohs(rtp->seq_number), ntohl(rtp->timestamp));

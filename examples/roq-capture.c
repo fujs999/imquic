@@ -39,6 +39,8 @@ static volatile int capture_stop = 0;
 static volatile int capture_started = 0;
 
 static imquic_roq_rtp_state audio_rtp = { 0 }, video_rtp = { 0 };
+static imquic_roq_rtp_state svc_spatial_rtp[MOQ_LOC_SVC_MAX_SPATIAL_LAYERS] = { 0 };
+static uint32_t svc_rtp_ssrc_base = 0;
 
 static OpusEncoder *audioenc = NULL;
 static SDL_AudioDeviceID audio_dev = 0;
@@ -101,14 +103,20 @@ static void roq_capture_send_video_packet(AVPacket *packet, int target_fps,
 			return;
 		}
 	}
+	imquic_roq_rtp_state *rtp_state = &video_rtp;
+	if(svc && moq_loc_svc_use_multi_spatial_encode(&svc_cfg)) {
+		if(layer.spatial_id >= (uint8_t)svc_cfg.spatial_layers)
+			return;
+		rtp_state = &svc_spatial_rtp[layer.spatial_id];
+	}
 	if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC) {
-		imquic_roq_rtp_packetize_vp9(&video_rtp, packet->data, (size_t)packet->size, target_fps, kf,
+		imquic_roq_rtp_packetize_vp9(rtp_state, packet->data, (size_t)packet->size, target_fps, kf,
 			roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
 	} else if(video_codec_id == DEMO_VP8) {
-		imquic_roq_rtp_packetize_vp8(&video_rtp, packet->data, (size_t)packet->size, target_fps, kf,
+		imquic_roq_rtp_packetize_vp8(rtp_state, packet->data, (size_t)packet->size, target_fps, kf,
 			roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
 	} else {
-		imquic_roq_rtp_packetize_h264_annexb(&video_rtp, packet->data, (size_t)packet->size, target_fps,
+		imquic_roq_rtp_packetize_h264_annexb(rtp_state, packet->data, (size_t)packet->size, target_fps,
 			roq_capture_emit_rtp, GUINT_TO_POINTER((guint)cfg.video_flow));
 	}
 }
@@ -191,7 +199,7 @@ static void roq_capture_encode_spatial_layers(AVFrame *source, int target_fps, g
 		}
 		sws_scale(svc_spatial_sws[s], (const uint8_t * const*)source->data, source->linesize,
 			0, source->height, scaled->data, scaled->linesize);
-		if(force_kf && s == 0)
+		if(force_kf)
 			scaled->pict_type = AV_PICTURE_TYPE_I;
 		else
 			scaled->pict_type = AV_PICTURE_TYPE_NONE;
@@ -486,7 +494,10 @@ int roq_capture_init(const roq_capture_config *config, roq_capture_rtp_cb cb, vo
 			return -1;
 	}
 	if(cfg.capture_video) {
+		int s = 0;
 		imquic_roq_rtp_state_init(&video_rtp, cfg.video_pt, (uint32_t)g_random_int());
+		svc_rtp_ssrc_base = video_rtp.ssrc & ~IMQUIC_ROQ_SVC_SSRC_SPATIAL_MASK;
+		video_rtp.ssrc = svc_rtp_ssrc_base;
 		video_codec_id = cfg.video_codec;
 		if(video_codec_id == DEMO_UNKOWN)
 			video_codec_id = DEMO_H264_ANNEXB;
@@ -511,6 +522,14 @@ int roq_capture_init(const roq_capture_config *config, roq_capture_rtp_cb cb, vo
 			}
 			IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC enabled: %d temporal layer(s), %d spatial layer(s)\n",
 				svc_cfg.temporal_layers, svc_cfg.spatial_layers);
+			if(moq_loc_svc_use_multi_spatial_encode(&svc_cfg)) {
+				for(s = 0; s < svc_cfg.spatial_layers; s++) {
+					imquic_roq_rtp_state_init(&svc_spatial_rtp[s], cfg.video_pt,
+						imquic_roq_rtp_svc_spatial_ssrc(svc_rtp_ssrc_base, (uint8_t)s));
+				}
+				IMQUIC_LOG(IMQUIC_LOG_INFO, "SVC multi-spatial RTP: SSRC base 0x%08x (spatial id in low byte)\n",
+					svc_rtp_ssrc_base);
+			}
 		}
 		if(roq_capture_create_video() < 0)
 			return -1;

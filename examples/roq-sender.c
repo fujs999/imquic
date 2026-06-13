@@ -188,7 +188,7 @@ static void imquic_demo_rtp_incoming(imquic_connection *conn, imquic_roq_multipl
 			roq_capture_set_remote_max_temporal_layer((int)remote_max_temporal);
 			if(remote_max_spatial != 0xFF)
 				roq_capture_set_remote_max_spatial_layer((int)remote_max_spatial);
-			IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] Remote SVC max layers: temporal=%u spatial=%u\n",
+			IMQUIC_LOG(IMQUIC_LOG_INFO, "[%s] Remote SVC feedback: temporal max index %u, spatial max index %u\n",
 				imquic_get_connection_name(conn), remote_max_temporal,
 				remote_max_spatial != 0xFF ? remote_max_spatial : 255);
 			return;

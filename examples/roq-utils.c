@@ -387,6 +387,20 @@ gboolean imquic_roq_rtp_depay_vp9(imquic_roq_vp9_depay *depay,
 
 #define IMQUIC_ROQ_SVC_FEEDBACK_MAGIC 0x46435653
 
+uint32_t imquic_roq_rtp_svc_spatial_ssrc(uint32_t base_ssrc, uint8_t spatial_id) {
+	return (base_ssrc & ~IMQUIC_ROQ_SVC_SSRC_SPATIAL_MASK) | (uint32_t)spatial_id;
+}
+
+int imquic_roq_rtp_ssrc_spatial_id(uint32_t ssrc, int spatial_layers) {
+	uint8_t spatial = 0;
+	if(spatial_layers <= 1)
+		return -1;
+	spatial = (uint8_t)(ssrc & IMQUIC_ROQ_SVC_SSRC_SPATIAL_MASK);
+	if(spatial >= (uint8_t)spatial_layers)
+		return -1;
+	return (int)spatial;
+}
+
 size_t imquic_roq_rtp_build_svc_feedback(imquic_roq_rtp_state *state, uint8_t *buffer, size_t blen,
 		uint8_t max_temporal_layer, uint8_t max_spatial_layer) {
 	uint8_t payload[8];

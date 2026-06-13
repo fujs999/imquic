@@ -364,7 +364,7 @@ static const char *roq_display_overlay_templates[] = {
 	"RTT:  999.9 ms",
 	"QUIC jitter:  999.9 ms",
 	"Playout delay:  9999 ms",
-	"SVC layer: T9 (max=99)",
+	"SVC layer: S9 T9 (9 spatial x 9 temporal, cap S<=9 T<=9)",
 	NULL
 };
 
@@ -628,8 +628,9 @@ static void roq_display_render_video_overlay(SDL_Renderer *r) {
 	line_count++;
 	if(moq_loc_svc_is_svc_codec(video_codec_id)) {
 		g_snprintf(line_bufs[line_count], sizeof(line_bufs[0]),
-			"SVC layer: S%d T%d (max S=%d T=%d)",
+			"SVC layer: S%d T%d (%d spatial x %d temporal, cap S<=%d T<=%d)",
 			svc_current_spatial_layer, svc_current_temporal_layer,
+			svc_spatial_layers, svc_temporal_layers,
 			svc_max_spatial_layer >= 0 ? svc_max_spatial_layer : svc_spatial_layers - 1,
 			svc_max_temporal_layer >= 0 ? svc_max_temporal_layer : svc_temporal_layers - 1);
 	} else {
@@ -649,7 +650,24 @@ static void roq_display_render_video_overlay(SDL_Renderer *r) {
 	}
 }
 
-static gboolean roq_display_svc_within_limits(const uint8_t *data, size_t len) {
+static int roq_display_target_spatial_layer(void) {
+	return moq_loc_svc_target_decode_spatial_layer(svc_spatial_layers, svc_max_spatial_layer);
+}
+
+static int roq_display_rtp_transport_spatial(imquic_roq_rtp_header *header) {
+	if(!moq_loc_svc_is_svc_codec(video_codec_id) || svc_spatial_layers <= 1 || header == NULL)
+		return -1;
+	return imquic_roq_rtp_ssrc_spatial_id(ntohl(header->ssrc), svc_spatial_layers);
+}
+
+static gboolean roq_display_should_process_rtp_spatial(imquic_roq_rtp_header *header) {
+	int spatial = roq_display_rtp_transport_spatial(header);
+	if(spatial < 0)
+		return svc_spatial_layers <= 1;
+	return spatial == roq_display_target_spatial_layer();
+}
+
+static gboolean roq_display_svc_within_limits(const uint8_t *data, size_t len, int transport_spatial) {
 	moq_loc_svc_layer layer = { 0 };
 	if(!moq_loc_svc_is_svc_codec(video_codec_id))
 		return TRUE;
@@ -657,6 +675,8 @@ static gboolean roq_display_svc_within_limits(const uint8_t *data, size_t len) {
 		return FALSE;
 	if(moq_loc_svc_parse_packet(video_codec_id, data, len, FALSE, &layer) < 0)
 		return TRUE;
+	if(transport_spatial >= 0)
+		layer.spatial_id = (uint8_t)transport_spatial;
 	svc_current_temporal_layer = layer.temporal_id;
 	svc_current_spatial_layer = layer.spatial_id;
 	if(svc_max_temporal_layer >= 0 && layer.temporal_id > (uint8_t)svc_max_temporal_layer)
@@ -724,12 +744,12 @@ static void roq_display_maybe_send_svc_feedback(void) {
 	imquic_connection_unref(conn);
 }
 
-static int roq_display_decode_access_unit(uint8_t *buffer, size_t length, gboolean keyframe) {
+static int roq_display_decode_access_unit(uint8_t *buffer, size_t length, gboolean keyframe, int transport_spatial) {
 	gboolean decoded = FALSE;
 
 	if(videodec_ctx == NULL)
 		return -1;
-	if(!roq_display_svc_within_limits(buffer, length))
+	if(!roq_display_svc_within_limits(buffer, length, transport_spatial))
 		return 0;
 	if(!got_keyframe) {
 		if(!keyframe) {
@@ -799,6 +819,9 @@ static void roq_display_feed_vp8(uint64_t flow_id, imquic_roq_rtp_header *header
 	uint8_t *frame = NULL;
 	size_t frame_len = 0;
 	gboolean keyframe = FALSE;
+	int transport_spatial = roq_display_rtp_transport_spatial(header);
+	if(!roq_display_should_process_rtp_spatial(header))
+		return;
 	roq_display_track_video_rtp(header);
 	if(payload_offset == 0 || payload_len == 0)
 		return;
@@ -816,7 +839,7 @@ static void roq_display_feed_vp8(uint64_t flow_id, imquic_roq_rtp_header *header
 	}
 	roq_display_track_video_frame(ntohl(header->timestamp));
 	keyframe = imquic_demo_vp8_is_keyframe(frame, frame_len);
-	roq_display_decode_access_unit(frame, frame_len, keyframe);
+	roq_display_decode_access_unit(frame, frame_len, keyframe, transport_spatial);
 	imquic_roq_vp8_depay_reset(&vp8_depay);
 }
 
@@ -827,6 +850,9 @@ static void roq_display_feed_vp9(uint64_t flow_id, imquic_roq_rtp_header *header
 	uint8_t *frame = NULL;
 	size_t frame_len = 0;
 	gboolean keyframe = FALSE;
+	int transport_spatial = roq_display_rtp_transport_spatial(header);
+	if(!roq_display_should_process_rtp_spatial(header))
+		return;
 	roq_display_track_video_rtp(header);
 	if(payload_offset == 0 || payload_len == 0)
 		return;
@@ -845,18 +871,22 @@ static void roq_display_feed_vp9(uint64_t flow_id, imquic_roq_rtp_header *header
 	roq_display_track_video_frame(ntohl(header->timestamp));
 	keyframe = imquic_demo_vp9_is_keyframe(frame, frame_len) ||
 		imquic_demo_vp9_rtp_is_keyframe(payload, payload_len);
-	roq_display_decode_access_unit(frame, frame_len, keyframe);
+	roq_display_decode_access_unit(frame, frame_len, keyframe, transport_spatial);
 	imquic_roq_vp9_depay_reset(&vp9_depay);
 }
 
 static void roq_display_feed_video(uint64_t flow_id, imquic_roq_rtp_header *header,
 		uint8_t *rtp, size_t rtp_len) {
+	int transport_spatial = 0;
 	if(videodec_ctx == NULL)
 		return;
 	if(cfg.video_flow >= 0 && (int64_t)flow_id != cfg.video_flow)
 		return;
 	if(cfg.video_pt != 255 && header->type != cfg.video_pt)
 		return;
+	if(!roq_display_should_process_rtp_spatial(header))
+		return;
+	transport_spatial = roq_display_rtp_transport_spatial(header);
 	if(video_codec_id == DEMO_VP9 || video_codec_id == DEMO_VP9_SVC) {
 		roq_display_feed_vp9(flow_id, header, rtp, rtp_len);
 		return;
@@ -884,7 +914,7 @@ static void roq_display_feed_video(uint64_t flow_id, imquic_roq_rtp_header *head
 	}
 	roq_display_track_video_frame(ntohl(header->timestamp));
 	gboolean keyframe = roq_display_annexb_is_keyframe(depay.access_unit->data, depay.access_unit->len);
-	roq_display_decode_access_unit(depay.access_unit->data, depay.access_unit->len, keyframe);
+	roq_display_decode_access_unit(depay.access_unit->data, depay.access_unit->len, keyframe, transport_spatial);
 	roq_display_reset_depay();
 }
 
